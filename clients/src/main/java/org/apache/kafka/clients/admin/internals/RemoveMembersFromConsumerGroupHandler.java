@@ -16,6 +16,18 @@
  */
 package org.apache.kafka.clients.admin.internals;
 
+import org.apache.kafka.common.Node;
+import org.apache.kafka.common.message.LeaveGroupRequestData.MemberIdentity;
+import org.apache.kafka.common.message.LeaveGroupResponseData.MemberResponse;
+import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.requests.AbstractResponse;
+import org.apache.kafka.common.requests.FindCoordinatorRequest.CoordinatorType;
+import org.apache.kafka.common.requests.LeaveGroupRequest;
+import org.apache.kafka.common.requests.LeaveGroupResponse;
+import org.apache.kafka.common.utils.LogContext;
+
+import org.slf4j.Logger;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -24,18 +36,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.kafka.common.Node;
-import org.apache.kafka.common.message.LeaveGroupRequestData.MemberIdentity;
-import org.apache.kafka.common.message.LeaveGroupResponseData.MemberResponse;
-import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.requests.AbstractResponse;
-import org.apache.kafka.common.requests.LeaveGroupRequest;
-import org.apache.kafka.common.requests.LeaveGroupResponse;
-import org.apache.kafka.common.requests.FindCoordinatorRequest.CoordinatorType;
-import org.apache.kafka.common.utils.LogContext;
-import org.slf4j.Logger;
-
-public class RemoveMembersFromConsumerGroupHandler implements AdminApiHandler<CoordinatorKey, Map<MemberIdentity, Errors>> {
+public class RemoveMembersFromConsumerGroupHandler extends AdminApiHandler.Batched<CoordinatorKey, Map<MemberIdentity, Errors>> {
 
     private final CoordinatorKey groupId;
     private final List<MemberIdentity> members;
@@ -79,7 +80,7 @@ public class RemoveMembersFromConsumerGroupHandler implements AdminApiHandler<Co
     }
 
     @Override
-    public LeaveGroupRequest.Builder buildRequest(int coordinatorId, Set<CoordinatorKey> groupIds) {
+    public LeaveGroupRequest.Builder buildBatchedRequest(int coordinatorId, Set<CoordinatorKey> groupIds) {
         validateKeys(groupIds);
         return new LeaveGroupRequest.Builder(groupId.idValue, members);
     }
@@ -110,11 +111,7 @@ public class RemoveMembersFromConsumerGroupHandler implements AdminApiHandler<Co
                                  Errors.forCode(memberResponse.errorCode()));
             }
 
-            return new ApiResult<>(
-                Collections.singletonMap(groupId, memberErrors),
-                Collections.emptyMap(),
-                Collections.emptyList()
-            );
+            return ApiResult.completed(groupId, memberErrors);
         }
     }
 
@@ -129,7 +126,6 @@ public class RemoveMembersFromConsumerGroupHandler implements AdminApiHandler<Co
                 log.debug("`LeaveGroup` request for group id {} failed due to error {}", groupId.idValue, error);
                 failed.put(groupId, error.exception());
                 break;
-
             case COORDINATOR_LOAD_IN_PROGRESS:
                 // If the coordinator is in the middle of loading, then we just need to retry
                 log.debug("`LeaveGroup` request for group id {} failed because the coordinator " +

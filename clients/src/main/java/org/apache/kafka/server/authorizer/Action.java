@@ -17,10 +17,11 @@
 
 package org.apache.kafka.server.authorizer;
 
-import java.util.Objects;
 import org.apache.kafka.common.acl.AclOperation;
 import org.apache.kafka.common.annotation.InterfaceStability;
 import org.apache.kafka.common.resource.ResourcePattern;
+
+import java.util.Objects;
 
 @InterfaceStability.Evolving
 public class Action {
@@ -119,7 +120,7 @@ public class Action {
     @Override
     public String toString() {
         return "Action(" +
-            ", resourcePattern='" + resourcePattern + '\'' +
+            "resourcePattern='" + resourcePattern + '\'' +
             ", operation='" + operation + '\'' +
             ", resourceReferenceCount='" + resourceReferenceCount + '\'' +
             ", logIfAllowed='" + logIfAllowed + '\'' +

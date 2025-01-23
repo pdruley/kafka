@@ -29,8 +29,8 @@ import org.apache.kafka.common.requests.MetadataRequest;
 import org.apache.kafka.common.requests.MetadataResponse;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.MockTime;
-import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.test.TestUtils;
+
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
@@ -58,6 +58,7 @@ public class AllBrokersStrategyIntegrationTest {
             new MockApiHandler(),
             result,
             time.milliseconds() + TIMEOUT_MS,
+            RETRY_BACKOFF_MS,
             RETRY_BACKOFF_MS,
             logContext
         );
@@ -110,7 +111,7 @@ public class AllBrokersStrategyIntegrationTest {
         assertEquals(1, lookupSpecs.size());
         AdminApiDriver.RequestSpec<AllBrokersStrategy.BrokerKey> lookupSpec = lookupSpecs.get(0);
 
-        Set<Integer> brokerIds = Utils.mkSet(1, 2);
+        Set<Integer> brokerIds = Set.of(1, 2);
         driver.onResponse(time.milliseconds(), lookupSpec, responseWithBrokers(brokerIds), Node.noNode());
         assertTrue(result.all().isDone());
 
@@ -215,7 +216,7 @@ public class AllBrokersStrategyIntegrationTest {
         return new MetadataResponse(response, ApiKeys.METADATA.latestVersion());
     }
 
-    private class MockApiHandler implements AdminApiHandler<AllBrokersStrategy.BrokerKey, Integer> {
+    private class MockApiHandler extends AdminApiHandler.Batched<AllBrokersStrategy.BrokerKey, Integer> {
         private final AllBrokersStrategy allBrokersStrategy = new AllBrokersStrategy(logContext);
 
         @Override
@@ -224,7 +225,7 @@ public class AllBrokersStrategyIntegrationTest {
         }
 
         @Override
-        public AbstractRequest.Builder<?> buildRequest(
+        public AbstractRequest.Builder<?> buildBatchedRequest(
             int brokerId,
             Set<AllBrokersStrategy.BrokerKey> keys
         ) {

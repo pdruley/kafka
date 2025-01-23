@@ -45,12 +45,10 @@ public class DescribeUserScramCredentialsRequest extends AbstractRequest {
     }
 
     private final DescribeUserScramCredentialsRequestData data;
-    private final short version;
 
     private DescribeUserScramCredentialsRequest(DescribeUserScramCredentialsRequestData data, short version) {
         super(ApiKeys.DESCRIBE_USER_SCRAM_CREDENTIALS, version);
         this.data = data;
-        this.version = version;
     }
 
     public static DescribeUserScramCredentialsRequest parse(ByteBuffer buffer, short version) {
@@ -66,8 +64,15 @@ public class DescribeUserScramCredentialsRequest extends AbstractRequest {
     @Override
     public AbstractResponse getErrorResponse(int throttleTimeMs, Throwable e) {
         ApiError apiError = ApiError.fromThrowable(e);
-        return new DescribeUserScramCredentialsResponse(new DescribeUserScramCredentialsResponseData()
+        DescribeUserScramCredentialsResponseData response = new DescribeUserScramCredentialsResponseData()
+                .setThrottleTimeMs(throttleTimeMs)
                 .setErrorCode(apiError.error().code())
-                .setErrorMessage(apiError.message()));
+                .setErrorMessage(apiError.message());
+        for (DescribeUserScramCredentialsRequestData.UserName user : data.users()) {
+            response.results().add(new DescribeUserScramCredentialsResponseData.DescribeUserScramCredentialsResult()
+                    .setErrorCode(apiError.error().code())
+                    .setErrorMessage(apiError.message()));
+        }
+        return new DescribeUserScramCredentialsResponse(response);
     }
 }

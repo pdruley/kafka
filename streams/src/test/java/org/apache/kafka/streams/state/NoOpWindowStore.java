@@ -16,11 +16,12 @@
  */
 package org.apache.kafka.streams.state;
 
-import java.time.Instant;
 import org.apache.kafka.streams.KeyValue;
-import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.processor.StateStore;
+import org.apache.kafka.streams.processor.StateStoreContext;
+import org.apache.kafka.streams.query.Position;
 
+import java.time.Instant;
 import java.util.NoSuchElementException;
 
 public class NoOpWindowStore implements ReadOnlyWindowStore, StateStore {
@@ -54,11 +55,8 @@ public class NoOpWindowStore implements ReadOnlyWindowStore, StateStore {
         return "";
     }
 
-    @Deprecated
     @Override
-    public void init(final ProcessorContext context, final StateStore root) {
-
-    }
+    public void init(final StateStoreContext stateStoreContext, final StateStore root) {}
 
     @Override
     public void flush() {
@@ -78,6 +76,11 @@ public class NoOpWindowStore implements ReadOnlyWindowStore, StateStore {
     @Override
     public boolean isOpen() {
         return false;
+    }
+
+    @Override
+    public Position getPosition() {
+        throw new UnsupportedOperationException("Position handling not implemented");
     }
 
     @Override

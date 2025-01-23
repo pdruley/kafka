@@ -112,8 +112,7 @@ public interface Authorizer extends Configurable, Closeable {
      * to process the update synchronously on the request thread.
      *
      * @param requestContext Request context if the ACL is being created by a broker to handle
-     *        a client request to create ACLs. This may be null if ACLs are created directly in ZooKeeper
-     *        using AclCommand.
+     *        a client request to create ACLs.
      * @param aclBindings ACL bindings to create
      *
      * @return Create result for each ACL binding in the same order as in the input list. Each result
@@ -131,8 +130,7 @@ public interface Authorizer extends Configurable, Closeable {
      * Refer to the authorizer implementation docs for details on concurrent update guarantees.
      *
      * @param requestContext Request context if the ACL is being deleted by a broker to handle
-     *        a client request to delete ACLs. This may be null if ACLs are deleted directly in ZooKeeper
-     *        using AclCommand.
+     *        a client request to delete ACLs.
      * @param aclBindingFilters Filters to match ACL bindings that are to be deleted
      *
      * @return Delete result for each filter in the same order as in the input list.
@@ -152,6 +150,14 @@ public interface Authorizer extends Configurable, Closeable {
      * @return Iterator for ACL bindings, which may be populated lazily.
      */
     Iterable<AclBinding> acls(AclBindingFilter filter);
+
+    /**
+     * Get the current number of ACLs, for the purpose of metrics. Authorizers that don't implement this function
+     * will simply return -1.
+     */
+    default int aclCount() {
+        return -1;
+    }
 
     /**
      * Check if the caller is authorized to perform the given ACL operation on at least one
@@ -193,15 +199,15 @@ public interface Authorizer extends Configurable, Closeable {
             resourceTypeFilter, AccessControlEntryFilter.ANY);
 
         EnumMap<PatternType, Set<String>> denyPatterns =
-            new EnumMap<PatternType, Set<String>>(PatternType.class) {{
-                put(PatternType.LITERAL, new HashSet<>());
-                put(PatternType.PREFIXED, new HashSet<>());
-            }};
+            new EnumMap<>(PatternType.class) {{
+                    put(PatternType.LITERAL, new HashSet<>());
+                    put(PatternType.PREFIXED, new HashSet<>());
+                }};
         EnumMap<PatternType, Set<String>> allowPatterns =
-            new EnumMap<PatternType, Set<String>>(PatternType.class) {{
-                put(PatternType.LITERAL, new HashSet<>());
-                put(PatternType.PREFIXED, new HashSet<>());
-            }};
+            new EnumMap<>(PatternType.class) {{
+                    put(PatternType.LITERAL, new HashSet<>());
+                    put(PatternType.PREFIXED, new HashSet<>());
+                }};
 
         boolean hasWildCardAllow = false;
 

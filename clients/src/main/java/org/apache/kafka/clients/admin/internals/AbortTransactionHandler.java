@@ -30,15 +30,17 @@ import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.WriteTxnMarkersRequest;
 import org.apache.kafka.common.requests.WriteTxnMarkersResponse;
 import org.apache.kafka.common.utils.LogContext;
+
 import org.slf4j.Logger;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static java.util.Collections.singleton;
 import static java.util.Collections.singletonList;
 
-public class AbortTransactionHandler implements AdminApiHandler<TopicPartition, Void> {
+public class AbortTransactionHandler extends AdminApiHandler.Batched<TopicPartition, Void> {
     private final Logger log;
     private final AbortTransactionSpec abortSpec;
     private final PartitionLeaderStrategy lookupStrategy;
@@ -52,10 +54,11 @@ public class AbortTransactionHandler implements AdminApiHandler<TopicPartition, 
         this.lookupStrategy = new PartitionLeaderStrategy(logContext);
     }
 
-    public static AdminApiFuture.SimpleAdminApiFuture<TopicPartition, Void> newFuture(
-        Set<TopicPartition> topicPartitions
+    public static PartitionLeaderStrategy.PartitionLeaderFuture<Void> newFuture(
+        Set<TopicPartition> topicPartitions,
+        Map<TopicPartition, Integer> partitionLeaderCache
     ) {
-        return AdminApiFuture.forKeys(topicPartitions);
+        return new PartitionLeaderStrategy.PartitionLeaderFuture<>(topicPartitions, partitionLeaderCache);
     }
 
     @Override
@@ -69,7 +72,7 @@ public class AbortTransactionHandler implements AdminApiHandler<TopicPartition, 
     }
 
     @Override
-    public WriteTxnMarkersRequest.Builder buildRequest(
+    public WriteTxnMarkersRequest.Builder buildBatchedRequest(
         int brokerId,
         Set<TopicPartition> topicPartitions
     ) {

@@ -18,6 +18,7 @@ package org.apache.kafka.server.log.remote.metadata.storage;
 
 import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.utils.Utils;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,7 +44,7 @@ public class RemoteLogMetadataTopicPartitioner {
         // We do not want to depend upon hash code generation of Uuid as that may change.
         int hash = Objects.hash(topicIdPartition.topicId().getLeastSignificantBits(),
                                 topicIdPartition.topicId().getMostSignificantBits(),
-                                topicIdPartition.topicPartition().partition());
+                                topicIdPartition.partition());
 
         return toBytes(hash);
     }

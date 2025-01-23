@@ -17,6 +17,7 @@
 package org.apache.kafka.server.log.remote.metadata.storage;
 
 import org.apache.kafka.common.TopicIdPartition;
+import org.apache.kafka.common.errors.ReplicaNotAvailableException;
 import org.apache.kafka.server.log.remote.storage.RemoteLogSegmentId;
 import org.apache.kafka.server.log.remote.storage.RemoteLogSegmentMetadata;
 import org.apache.kafka.server.log.remote.storage.RemoteLogSegmentMetadataUpdate;
@@ -24,6 +25,7 @@ import org.apache.kafka.server.log.remote.storage.RemotePartitionDeleteMetadata;
 import org.apache.kafka.server.log.remote.storage.RemotePartitionDeleteState;
 import org.apache.kafka.server.log.remote.storage.RemoteResourceNotFoundException;
 import org.apache.kafka.server.log.remote.storage.RemoteStorageException;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,20 +50,28 @@ public class RemotePartitionMetadataStore extends RemotePartitionMetadataEventHa
     private Map<TopicIdPartition, RemoteLogMetadataCache> idToRemoteLogMetadataCache =
             new ConcurrentHashMap<>();
 
+    public RemotePartitionMetadataStore() {
+    }
+
     @Override
     public void handleRemoteLogSegmentMetadata(RemoteLogSegmentMetadata remoteLogSegmentMetadata) {
-        log.debug("Adding remote log segment : [{}]", remoteLogSegmentMetadata);
+        log.debug("Adding remote log segment: {}", remoteLogSegmentMetadata);
 
-        RemoteLogSegmentId remoteLogSegmentId = remoteLogSegmentMetadata.remoteLogSegmentId();
+        final RemoteLogSegmentId remoteLogSegmentId = remoteLogSegmentMetadata.remoteLogSegmentId();
+        TopicIdPartition topicIdPartition = remoteLogSegmentId.topicIdPartition();
 
-        idToRemoteLogMetadataCache
-                .computeIfAbsent(remoteLogSegmentId.topicIdPartition(), id -> new RemoteLogMetadataCache())
-                .addCopyInProgressSegment(remoteLogSegmentMetadata);
+        // This should have been already existing as it is loaded when the partitions are assigned.
+        RemoteLogMetadataCache remoteLogMetadataCache = idToRemoteLogMetadataCache.get(topicIdPartition);
+        if (remoteLogMetadataCache != null) {
+            remoteLogMetadataCache.addCopyInProgressSegment(remoteLogSegmentMetadata);
+        } else {
+            throw new IllegalStateException("No partition metadata found for : " + topicIdPartition);
+        }
     }
 
     @Override
     public void handleRemoteLogSegmentMetadataUpdate(RemoteLogSegmentMetadataUpdate rlsmUpdate) {
-        log.debug("Updating remote log segment: [{}]", rlsmUpdate);
+        log.debug("Updating remote log segment: {}", rlsmUpdate);
         RemoteLogSegmentId remoteLogSegmentId = rlsmUpdate.remoteLogSegmentId();
         TopicIdPartition topicIdPartition = remoteLogSegmentId.topicIdPartition();
         RemoteLogMetadataCache remoteLogMetadataCache = idToRemoteLogMetadataCache.get(topicIdPartition);
@@ -69,16 +79,16 @@ public class RemotePartitionMetadataStore extends RemotePartitionMetadataEventHa
             try {
                 remoteLogMetadataCache.updateRemoteLogSegmentMetadata(rlsmUpdate);
             } catch (RemoteResourceNotFoundException e) {
-                log.error("Error occurred while updating the remote log segment.");
+                log.warn("Error occurred while updating the remote log segment.", e);
             }
         } else {
-            log.error("No partition metadata found for : " + topicIdPartition);
+            throw new IllegalStateException("No partition metadata found for : " + topicIdPartition);
         }
     }
 
     @Override
     public void handleRemotePartitionDeleteMetadata(RemotePartitionDeleteMetadata remotePartitionDeleteMetadata) {
-        log.debug("Received partition delete state with: [{}]", remotePartitionDeleteMetadata);
+        log.debug("Received partition delete state with: {}", remotePartitionDeleteMetadata);
 
         TopicIdPartition topicIdPartition = remotePartitionDeleteMetadata.topicIdPartition();
         idToPartitionDeleteMetadata.put(topicIdPartition, remotePartitionDeleteMetadata);
@@ -91,27 +101,32 @@ public class RemotePartitionMetadataStore extends RemotePartitionMetadataEventHa
         }
     }
 
+    @Override
+    public void clearTopicPartition(TopicIdPartition topicIdPartition) {
+        idToRemoteLogMetadataCache.remove(topicIdPartition);
+    }
+
     public Iterator<RemoteLogSegmentMetadata> listRemoteLogSegments(TopicIdPartition topicIdPartition)
             throws RemoteStorageException {
-        Objects.requireNonNull(topicIdPartition, "topicIdPartition can not be null");
-
         return getRemoteLogMetadataCache(topicIdPartition).listAllRemoteLogSegments();
     }
 
     public Iterator<RemoteLogSegmentMetadata> listRemoteLogSegments(TopicIdPartition topicIdPartition, int leaderEpoch)
             throws RemoteStorageException {
-        Objects.requireNonNull(topicIdPartition, "topicIdPartition can not be null");
-
         return getRemoteLogMetadataCache(topicIdPartition).listRemoteLogSegments(leaderEpoch);
     }
 
     private RemoteLogMetadataCache getRemoteLogMetadataCache(TopicIdPartition topicIdPartition)
             throws RemoteResourceNotFoundException {
+        Objects.requireNonNull(topicIdPartition, "topicIdPartition can not be null");
         RemoteLogMetadataCache remoteLogMetadataCache = idToRemoteLogMetadataCache.get(topicIdPartition);
         if (remoteLogMetadataCache == null) {
             throw new RemoteResourceNotFoundException("No resource found for partition: " + topicIdPartition);
         }
-
+        if (!remoteLogMetadataCache.isInitialized()) {
+            // Throwing a retriable ReplicaNotAvailableException here for clients retry.
+            throw new ReplicaNotAvailableException("Remote log metadata cache is not initialized for partition: " + topicIdPartition);
+        }
         return remoteLogMetadataCache;
     }
 
@@ -119,15 +134,17 @@ public class RemotePartitionMetadataStore extends RemotePartitionMetadataEventHa
                                                                        long offset,
                                                                        int epochForOffset)
             throws RemoteStorageException {
-        Objects.requireNonNull(topicIdPartition, "topicIdPartition can not be null");
-
         return getRemoteLogMetadataCache(topicIdPartition).remoteLogSegmentMetadata(epochForOffset, offset);
+    }
+
+    public Optional<RemoteLogSegmentMetadata> nextSegmentWithTxnIndex(TopicIdPartition topicIdPartition,
+                                                                      int epoch,
+                                                                      long offset) throws RemoteStorageException {
+        return getRemoteLogMetadataCache(topicIdPartition).nextSegmentWithTxnIndex(epoch, offset);
     }
 
     public Optional<Long> highestLogOffset(TopicIdPartition topicIdPartition,
                                            int leaderEpoch) throws RemoteStorageException {
-        Objects.requireNonNull(topicIdPartition, "topicIdPartition can not be null");
-
         return getRemoteLogMetadataCache(topicIdPartition).highestOffsetForEpoch(leaderEpoch);
     }
 
@@ -139,5 +156,22 @@ public class RemotePartitionMetadataStore extends RemotePartitionMetadataEventHa
         // Practically, we do not use the same instances that are closed.
         idToPartitionDeleteMetadata = Collections.emptyMap();
         idToRemoteLogMetadataCache = Collections.emptyMap();
+    }
+
+    @Override
+    public void maybeLoadPartition(TopicIdPartition partition) {
+        idToRemoteLogMetadataCache.computeIfAbsent(partition, idPartition -> new RemoteLogMetadataCache());
+    }
+
+    @Override
+    public void markInitialized(TopicIdPartition partition) {
+        idToRemoteLogMetadataCache.get(partition).markInitialized();
+        log.trace("Remote log components are initialized for user-partition: {}", partition);
+    }
+
+    @Override
+    public boolean isInitialized(TopicIdPartition topicIdPartition) {
+        RemoteLogMetadataCache metadataCache = idToRemoteLogMetadataCache.get(topicIdPartition);
+        return metadataCache != null && metadataCache.isInitialized();
     }
 }

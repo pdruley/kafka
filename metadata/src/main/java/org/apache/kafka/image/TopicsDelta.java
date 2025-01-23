@@ -17,17 +17,21 @@
 
 package org.apache.kafka.image;
 
+import org.apache.kafka.common.TopicIdPartition;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.metadata.PartitionChangeRecord;
 import org.apache.kafka.common.metadata.PartitionRecord;
 import org.apache.kafka.common.metadata.RemoveTopicRecord;
 import org.apache.kafka.common.metadata.TopicRecord;
+import org.apache.kafka.metadata.Replicas;
+import org.apache.kafka.server.common.MetadataVersion;
+import org.apache.kafka.server.immutable.ImmutableMap;
 
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Set;
 
 
@@ -50,6 +54,8 @@ public final class TopicsDelta {
      */
     private final Set<Uuid> deletedTopicIds = new HashSet<>();
 
+    private final Set<Uuid> createdTopicIds = new HashSet<>();
+
     public TopicsDelta(TopicsImage image) {
         this.image = image;
     }
@@ -66,6 +72,7 @@ public final class TopicsDelta {
         TopicDelta delta = new TopicDelta(
             new TopicImage(record.name(), record.topicId(), Collections.emptyMap()));
         changedTopics.put(record.topicId(), delta);
+        createdTopicIds.add(record.topicId());
     }
 
     TopicDelta getOrCreateTopicDelta(Uuid id) {
@@ -115,30 +122,32 @@ public final class TopicsDelta {
         }
     }
 
+    public void handleMetadataVersionChange(MetadataVersion newVersion) {
+        // no-op
+    }
+
     public TopicsImage apply() {
-        Map<Uuid, TopicImage> newTopicsById = new HashMap<>(image.topicsById().size());
-        Map<String, TopicImage> newTopicsByName = new HashMap<>(image.topicsByName().size());
-        for (Entry<Uuid, TopicImage> entry : image.topicsById().entrySet()) {
-            Uuid id = entry.getKey();
-            TopicImage prevTopicImage = entry.getValue();
-            TopicDelta delta = changedTopics.get(id);
-            if (delta == null) {
-                if (!deletedTopicIds.contains(id)) {
-                    newTopicsById.put(id, prevTopicImage);
-                    newTopicsByName.put(prevTopicImage.name(), prevTopicImage);
-                }
+        ImmutableMap<Uuid, TopicImage> newTopicsById = image.topicsById();
+        ImmutableMap<String, TopicImage> newTopicsByName = image.topicsByName();
+        // apply all the deletes
+        for (Uuid topicId: deletedTopicIds) {
+            // it was deleted, so we have to remove it from the maps
+            TopicImage originalTopicToBeDeleted = image.topicsById().get(topicId);
+            if (originalTopicToBeDeleted == null) {
+                throw new IllegalStateException("Missing topic id " + topicId);
             } else {
-                TopicImage newTopicImage = delta.apply();
-                newTopicsById.put(id, newTopicImage);
-                newTopicsByName.put(delta.name(), newTopicImage);
+                newTopicsById = newTopicsById.removed(topicId);
+                newTopicsByName = newTopicsByName.removed(originalTopicToBeDeleted.name());
             }
         }
-        for (Entry<Uuid, TopicDelta> entry : changedTopics.entrySet()) {
-            if (!newTopicsById.containsKey(entry.getKey())) {
-                TopicImage newTopicImage = entry.getValue().apply();
-                newTopicsById.put(newTopicImage.id(), newTopicImage);
-                newTopicsByName.put(newTopicImage.name(), newTopicImage);
-            }
+        // apply all the updates/additions
+        for (Map.Entry<Uuid, TopicDelta> entry: changedTopics.entrySet()) {
+            Uuid topicId = entry.getKey();
+            TopicImage newTopicToBeAddedOrUpdated = entry.getValue().apply();
+            // put new information into the maps
+            String topicName = newTopicToBeAddedOrUpdated.name();
+            newTopicsById = newTopicsById.updated(topicId, newTopicToBeAddedOrUpdated);
+            newTopicsByName = newTopicsByName.updated(topicName, newTopicToBeAddedOrUpdated);
         }
         return new TopicsImage(newTopicsById, newTopicsByName);
     }
@@ -161,5 +170,68 @@ public final class TopicsDelta {
 
     public Set<Uuid> deletedTopicIds() {
         return deletedTopicIds;
+    }
+
+    public Set<Uuid> createdTopicIds() {
+        return createdTopicIds;
+    }
+
+    /**
+     * Find the topic partitions that have change based on the replica given.
+     * <p>
+     * The changes identified are:
+     * <ul>
+     *   <li>deletes: partitions for which the broker is not a replica anymore</li>
+     *   <li>electedLeaders: partitions for which the broker is now a leader (leader epoch bump on the leader)</li>
+     *   <li>leaders: partitions for which the isr or replicas change if the broker is a leader (partition epoch bump on the leader)</li>
+     *   <li>followers: partitions for which the broker is now a follower or follower with isr or replica updates (partition epoch bump on follower)</li>
+     *   <li>topicIds: a map of topic names to topic IDs in leaders and followers changes</li>
+     *   <li>directoryIds: partitions for which directory id changes or newly added to the broker</li>
+     * </ul>
+     * <p>
+     * Leader epoch bumps are a strict subset of all partition epoch bumps, so all partitions in electedLeaders will be in leaders.
+     *
+     * @param brokerId the broker id
+     * @return the LocalReplicaChanges that cover changes in the broker
+     */
+    public LocalReplicaChanges localChanges(int brokerId) {
+        Set<TopicPartition> deletes = new HashSet<>();
+        Map<TopicPartition, LocalReplicaChanges.PartitionInfo> electedLeaders = new HashMap<>();
+        Map<TopicPartition, LocalReplicaChanges.PartitionInfo> leaders = new HashMap<>();
+        Map<TopicPartition, LocalReplicaChanges.PartitionInfo> followers = new HashMap<>();
+        Map<String, Uuid> topicIds = new HashMap<>();
+        Map<TopicIdPartition, Uuid> directoryIds = new HashMap<>();
+
+        for (TopicDelta delta : changedTopics.values()) {
+            LocalReplicaChanges changes = delta.localChanges(brokerId);
+
+            deletes.addAll(changes.deletes());
+            electedLeaders.putAll(changes.electedLeaders());
+            leaders.putAll(changes.leaders());
+            followers.putAll(changes.followers());
+            topicIds.putAll(changes.topicIds());
+            directoryIds.putAll(changes.directoryIds());
+        }
+
+        // Add all of the removed topic partitions to the set of locally removed partitions
+        deletedTopicIds().forEach(topicId -> {
+            TopicImage topicImage = image().getTopic(topicId);
+            topicImage.partitions().forEach((partitionId, prevPartition) -> {
+                if (Replicas.contains(prevPartition.replicas, brokerId)) {
+                    deletes.add(new TopicPartition(topicImage.name(), partitionId));
+                }
+            });
+        });
+
+        return new LocalReplicaChanges(deletes, electedLeaders, leaders, followers, topicIds, directoryIds);
+    }
+
+    @Override
+    public String toString() {
+        return "TopicsDelta(" +
+            "changedTopics=" + changedTopics +
+            ", deletedTopicIds=" + deletedTopicIds +
+            ", createdTopicIds=" + createdTopicIds +
+            ')';
     }
 }

@@ -16,16 +16,9 @@
  */
 package org.apache.kafka.streams.kstream.internals;
 
-import static org.apache.kafka.streams.kstream.internals.graph.OptimizableRepartitionNode.optimizableRepartitionNodeBuilder;
-
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.Map.Entry;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.streams.kstream.Aggregator;
+import org.apache.kafka.streams.kstream.EmitStrategy;
 import org.apache.kafka.streams.kstream.Initializer;
 import org.apache.kafka.streams.kstream.KTable;
 import org.apache.kafka.streams.kstream.Merger;
@@ -33,12 +26,21 @@ import org.apache.kafka.streams.kstream.SessionWindows;
 import org.apache.kafka.streams.kstream.SlidingWindows;
 import org.apache.kafka.streams.kstream.Window;
 import org.apache.kafka.streams.kstream.Windows;
+import org.apache.kafka.streams.kstream.internals.graph.GracePeriodGraphNode;
+import org.apache.kafka.streams.kstream.internals.graph.GraphNode;
 import org.apache.kafka.streams.kstream.internals.graph.OptimizableRepartitionNode.OptimizableRepartitionNodeBuilder;
 import org.apache.kafka.streams.kstream.internals.graph.ProcessorGraphNode;
 import org.apache.kafka.streams.kstream.internals.graph.ProcessorParameters;
-import org.apache.kafka.streams.kstream.internals.graph.StatefulProcessorNode;
-import org.apache.kafka.streams.kstream.internals.graph.GraphNode;
-import org.apache.kafka.streams.state.StoreBuilder;
+import org.apache.kafka.streams.processor.internals.StoreFactory;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Map.Entry;
+
+import static org.apache.kafka.streams.kstream.internals.graph.OptimizableRepartitionNode.optimizableRepartitionNodeBuilder;
 
 class CogroupedStreamAggregateBuilder<K, VOut> {
     private final InternalStreamsBuilder builder;
@@ -50,160 +52,169 @@ class CogroupedStreamAggregateBuilder<K, VOut> {
     <KR> KTable<KR, VOut> build(final Map<KGroupedStreamImpl<K, ?>, Aggregator<? super K, ? super Object, VOut>> groupPatterns,
                                 final Initializer<VOut> initializer,
                                 final NamedInternal named,
-                                final StoreBuilder<?> storeBuilder,
+                                final StoreFactory storeFactory,
                                 final Serde<KR> keySerde,
                                 final Serde<VOut> valueSerde,
-                                final String queryableName) {
-        processRepartitions(groupPatterns, storeBuilder);
+                                final String queryableName,
+                                final boolean isOutputVersioned) {
+        processRepartitions(groupPatterns, storeFactory.storeName());
         final Collection<GraphNode> processors = new ArrayList<>();
         final Collection<KStreamAggProcessorSupplier> parentProcessors = new ArrayList<>();
-        boolean stateCreated = false;
+        
         int counter = 0;
         for (final Entry<KGroupedStreamImpl<K, ?>, Aggregator<? super K, Object, VOut>> kGroupedStream : groupPatterns.entrySet()) {
-            final KStreamAggProcessorSupplier<K, K, ?, ?> parentProcessor =
-                new KStreamAggregate<>(storeBuilder.name(), initializer, kGroupedStream.getValue());
+            final KStreamAggProcessorSupplier<K, ?, K, ?> parentProcessor =
+                new KStreamAggregate<>(storeFactory, initializer, kGroupedStream.getValue());
             parentProcessors.add(parentProcessor);
-            final StatefulProcessorNode<K, ?> statefulProcessorNode = getStatefulProcessorNode(
-                named.suffixWithOrElseGet(
-                    "-cogroup-agg-" + counter++,
-                    builder,
-                    CogroupedKStreamImpl.AGGREGATE_NAME),
-                stateCreated,
-                storeBuilder,
-                parentProcessor);
-            stateCreated = true;
-            processors.add(statefulProcessorNode);
-            builder.addGraphNode(parentNodes.get(kGroupedStream.getKey()), statefulProcessorNode);
+            
+            final String kStreamAggProcessorName = named.suffixWithOrElseGet(
+                "-cogroup-agg-" + counter++,
+                builder,
+                CogroupedKStreamImpl.AGGREGATE_NAME);
+            final ProcessorGraphNode<K, ?> aggProcessorNode =
+                new ProcessorGraphNode<>(
+                    kStreamAggProcessorName,
+                    new ProcessorParameters<>(parentProcessor, kStreamAggProcessorName)
+                );
+            aggProcessorNode.setOutputVersioned(isOutputVersioned);
+            processors.add(aggProcessorNode);
+            builder.addGraphNode(parentNodes.get(kGroupedStream.getKey()), aggProcessorNode);
         }
-        return createTable(processors, parentProcessors, named, keySerde, valueSerde, queryableName, storeBuilder.name());
+        return createTable(processors, parentProcessors, named, keySerde, valueSerde, queryableName, storeFactory.storeName());
     }
 
     @SuppressWarnings("unchecked")
     <KR, W extends Window> KTable<KR, VOut> build(final Map<KGroupedStreamImpl<K, ?>, Aggregator<? super K, ? super Object, VOut>> groupPatterns,
                                                   final Initializer<VOut> initializer,
                                                   final NamedInternal named,
-                                                  final StoreBuilder<?> storeBuilder,
+                                                  final StoreFactory storeFactory,
                                                   final Serde<KR> keySerde,
                                                   final Serde<VOut> valueSerde,
                                                   final String queryableName,
                                                   final Windows<W> windows) {
-        processRepartitions(groupPatterns, storeBuilder);
+        processRepartitions(groupPatterns, storeFactory.storeName());
 
         final Collection<GraphNode> processors = new ArrayList<>();
         final Collection<KStreamAggProcessorSupplier> parentProcessors = new ArrayList<>();
-        boolean stateCreated = false;
         int counter = 0;
         for (final Entry<KGroupedStreamImpl<K, ?>, Aggregator<? super K, Object, VOut>> kGroupedStream : groupPatterns.entrySet()) {
-            final KStreamAggProcessorSupplier<K, K, ?, ?>  parentProcessor =
-                (KStreamAggProcessorSupplier<K, K, ?, ?>) new KStreamWindowAggregate<K, K, VOut, W>(
+            final KStreamAggProcessorSupplier<K, ?, K, ?>  parentProcessor =
+                (KStreamAggProcessorSupplier<K, ?, K, ?>) new KStreamWindowAggregate<K, K, VOut, W>(
                     windows,
-                    storeBuilder.name(),
+                    storeFactory,
+                    EmitStrategy.onWindowUpdate(),
                     initializer,
                     kGroupedStream.getValue());
             parentProcessors.add(parentProcessor);
-            final StatefulProcessorNode<K, ?> statefulProcessorNode = getStatefulProcessorNode(
-                named.suffixWithOrElseGet(
-                    "-cogroup-agg-" + counter++,
-                    builder,
-                    CogroupedKStreamImpl.AGGREGATE_NAME),
-                stateCreated,
-                storeBuilder,
-                parentProcessor);
-            stateCreated = true;
-            processors.add(statefulProcessorNode);
-            builder.addGraphNode(parentNodes.get(kGroupedStream.getKey()), statefulProcessorNode);
+            
+            final String kStreamAggProcessorName = named.suffixWithOrElseGet(
+                "-cogroup-agg-" + counter++,
+                builder,
+                CogroupedKStreamImpl.AGGREGATE_NAME);
+            final GracePeriodGraphNode<K, ?> aggProcessorNode =
+                new GracePeriodGraphNode<>(
+                    kStreamAggProcessorName,
+                    new ProcessorParameters<>(parentProcessor, kStreamAggProcessorName),
+                    windows.gracePeriodMs()
+                );
+            processors.add(aggProcessorNode);
+            builder.addGraphNode(parentNodes.get(kGroupedStream.getKey()), aggProcessorNode);
         }
-        return createTable(processors, parentProcessors, named, keySerde, valueSerde, queryableName, storeBuilder.name());
+        return createTable(processors, parentProcessors, named, keySerde, valueSerde, queryableName, storeFactory.storeName());
     }
 
     @SuppressWarnings("unchecked")
     <KR> KTable<KR, VOut> build(final Map<KGroupedStreamImpl<K, ?>, Aggregator<? super K, ? super Object, VOut>> groupPatterns,
                                 final Initializer<VOut> initializer,
                                 final NamedInternal named,
-                                final StoreBuilder<?> storeBuilder,
+                                final StoreFactory storeFactory,
                                 final Serde<KR> keySerde,
                                 final Serde<VOut> valueSerde,
                                 final String queryableName,
                                 final SessionWindows sessionWindows,
                                 final Merger<? super K, VOut> sessionMerger) {
-        processRepartitions(groupPatterns, storeBuilder);
+        processRepartitions(groupPatterns, storeFactory.storeName());
         final Collection<GraphNode> processors = new ArrayList<>();
         final Collection<KStreamAggProcessorSupplier> parentProcessors = new ArrayList<>();
-        boolean stateCreated = false;
         int counter = 0;
         for (final Entry<KGroupedStreamImpl<K, ?>, Aggregator<? super K, Object, VOut>> kGroupedStream : groupPatterns.entrySet()) {
-            final KStreamAggProcessorSupplier<K, K, ?, ?> parentProcessor =
-                (KStreamAggProcessorSupplier<K, K, ?, ?>) new KStreamSessionWindowAggregate<K, K, VOut>(
+            final KStreamAggProcessorSupplier<K, ?, K, ?> parentProcessor =
+                (KStreamAggProcessorSupplier<K, ?, K, ?>) new KStreamSessionWindowAggregate<K, K, VOut>(
                     sessionWindows,
-                    storeBuilder.name(),
+                    storeFactory,
+                    EmitStrategy.onWindowUpdate(),
                     initializer,
                     kGroupedStream.getValue(),
                     sessionMerger);
             parentProcessors.add(parentProcessor);
-            final StatefulProcessorNode<K, ?> statefulProcessorNode = getStatefulProcessorNode(
-                named.suffixWithOrElseGet(
-                    "-cogroup-agg-" + counter++,
-                    builder,
-                    CogroupedKStreamImpl.AGGREGATE_NAME),
-                stateCreated,
-                storeBuilder,
-                parentProcessor);
-            stateCreated = true;
-            processors.add(statefulProcessorNode);
-            builder.addGraphNode(parentNodes.get(kGroupedStream.getKey()), statefulProcessorNode);
+            final String kStreamAggProcessorName = named.suffixWithOrElseGet(
+                "-cogroup-agg-" + counter++,
+                builder,
+                CogroupedKStreamImpl.AGGREGATE_NAME);
+            final long gracePeriod = sessionWindows.gracePeriodMs() + sessionWindows.inactivityGap();
+            final GracePeriodGraphNode<K, ?> aggProcessorNode =
+                new GracePeriodGraphNode<>(
+                    kStreamAggProcessorName,
+                    new ProcessorParameters<>(parentProcessor, kStreamAggProcessorName),
+                    gracePeriod
+                );
+            processors.add(aggProcessorNode);
+            builder.addGraphNode(parentNodes.get(kGroupedStream.getKey()), aggProcessorNode);
         }
-        return createTable(processors, parentProcessors, named, keySerde, valueSerde, queryableName, storeBuilder.name());
+        return createTable(processors, parentProcessors, named, keySerde, valueSerde, queryableName, storeFactory.storeName());
     }
 
     @SuppressWarnings("unchecked")
     <KR> KTable<KR, VOut> build(final Map<KGroupedStreamImpl<K, ?>, Aggregator<? super K, ? super Object, VOut>> groupPatterns,
                                 final Initializer<VOut> initializer,
                                 final NamedInternal named,
-                                final StoreBuilder<?> storeBuilder,
+                                final StoreFactory storeFactory,
                                 final Serde<KR> keySerde,
                                 final Serde<VOut> valueSerde,
                                 final String queryableName,
                                 final SlidingWindows slidingWindows) {
-        processRepartitions(groupPatterns, storeBuilder);
+        processRepartitions(groupPatterns, storeFactory.storeName());
         final Collection<KStreamAggProcessorSupplier> parentProcessors = new ArrayList<>();
         final Collection<GraphNode> processors = new ArrayList<>();
-        boolean stateCreated = false;
         int counter = 0;
         for (final Entry<KGroupedStreamImpl<K, ?>, Aggregator<? super K, Object, VOut>> kGroupedStream : groupPatterns.entrySet()) {
-            final KStreamAggProcessorSupplier<K, K, ?, ?> parentProcessor =
-                (KStreamAggProcessorSupplier<K, K, ?, ?>) new KStreamSlidingWindowAggregate<K, K, VOut>(
+            final KStreamAggProcessorSupplier<K, ?, K, ?> parentProcessor =
+                (KStreamAggProcessorSupplier<K, ?, K, ?>) new KStreamSlidingWindowAggregate<K, K, VOut>(
                     slidingWindows,
-                    storeBuilder.name(),
+                    storeFactory,
+                    // TODO: We do not have other emit policies for co-group yet
+                    EmitStrategy.onWindowUpdate(),
                     initializer,
                     kGroupedStream.getValue());
             parentProcessors.add(parentProcessor);
-            final StatefulProcessorNode<K, ?> statefulProcessorNode = getStatefulProcessorNode(
-                named.suffixWithOrElseGet(
-                    "-cogroup-agg-" + counter++,
-                    builder,
-                    CogroupedKStreamImpl.AGGREGATE_NAME),
-                stateCreated,
-                storeBuilder,
-                parentProcessor);
-            stateCreated = true;
-            processors.add(statefulProcessorNode);
-            builder.addGraphNode(parentNodes.get(kGroupedStream.getKey()), statefulProcessorNode);
+            final String kStreamAggProcessorName = named.suffixWithOrElseGet(
+                "-cogroup-agg-" + counter++,
+                builder,
+                CogroupedKStreamImpl.AGGREGATE_NAME);
+            final GracePeriodGraphNode<K, ?> aggProcessorNode =
+                new GracePeriodGraphNode<>(
+                    kStreamAggProcessorName,
+                    new ProcessorParameters<>(parentProcessor, kStreamAggProcessorName),
+                    slidingWindows.gracePeriodMs()
+                );
+            processors.add(aggProcessorNode);
+            builder.addGraphNode(parentNodes.get(kGroupedStream.getKey()), aggProcessorNode);
         }
-        return createTable(processors, parentProcessors, named, keySerde, valueSerde, queryableName, storeBuilder.name());
+        return createTable(processors, parentProcessors, named, keySerde, valueSerde, queryableName, storeFactory.storeName());
     }
 
     private void processRepartitions(final Map<KGroupedStreamImpl<K, ?>, Aggregator<? super K, ? super Object, VOut>> groupPatterns,
-                                     final StoreBuilder<?> storeBuilder) {
+                                     final String storeName) {
         for (final KGroupedStreamImpl<K, ?> repartitionReqs : groupPatterns.keySet()) {
 
             if (repartitionReqs.repartitionRequired) {
 
                 final OptimizableRepartitionNodeBuilder<K, ?> repartitionNodeBuilder = optimizableRepartitionNodeBuilder();
 
-                final String repartionNamePrefix = repartitionReqs.userProvidedRepartitionTopicName != null ?
-                    repartitionReqs.userProvidedRepartitionTopicName : storeBuilder.name();
+                final String repartitionNamePrefix = repartitionReqs.userProvidedRepartitionTopicName != null ?
+                    repartitionReqs.userProvidedRepartitionTopicName : storeName;
 
-                createRepartitionSource(repartionNamePrefix, repartitionNodeBuilder, repartitionReqs.keySerde, repartitionReqs.valueSerde);
+                createRepartitionSource(repartitionNamePrefix, repartitionNodeBuilder, repartitionReqs.keySerde, repartitionReqs.valueSerde);
 
                 if (!parentNodes.containsKey(repartitionReqs)) {
                     final GraphNode repartitionNode = repartitionNodeBuilder.build();
@@ -235,7 +246,7 @@ class CogroupedStreamAggregateBuilder<K, VOut> {
             "-cogroup-merge",
             builder,
             CogroupedKStreamImpl.MERGE_NAME);
-        final KTableNewProcessorSupplier<K, VOut, K, VOut> passThrough = new KTablePassThrough<>(parentProcessors, storeName);
+        final KTableProcessorSupplier<K, VOut, K, VOut> passThrough = new KTablePassThrough<>(parentProcessors, storeName);
         final ProcessorParameters<K, VOut, ?, ?> processorParameters = new ProcessorParameters(passThrough, mergeProcessorName);
         final ProcessorGraphNode<K, VOut> mergeNode =
             new ProcessorGraphNode<>(mergeProcessorName, processorParameters);
@@ -251,31 +262,6 @@ class CogroupedStreamAggregateBuilder<K, VOut> {
             passThrough,
             mergeNode,
             builder);
-    }
-
-    @SuppressWarnings("deprecation") // Old PAPI. Needs to be migrated.
-    private StatefulProcessorNode<K, ?> getStatefulProcessorNode(final String processorName,
-                                                                 final boolean stateCreated,
-                                                                 final StoreBuilder<?> storeBuilder,
-                                                                 final org.apache.kafka.streams.processor.ProcessorSupplier<K, ?> kStreamAggregate) {
-        final StatefulProcessorNode<K, ?> statefulProcessorNode;
-        if (!stateCreated) {
-            statefulProcessorNode =
-                new StatefulProcessorNode<>(
-                    processorName,
-                    new ProcessorParameters<>(kStreamAggregate, processorName),
-                    storeBuilder
-                );
-        } else {
-            statefulProcessorNode =
-                new StatefulProcessorNode<>(
-                    processorName,
-                    new ProcessorParameters<>(kStreamAggregate, processorName),
-                    new String[]{storeBuilder.name()}
-                );
-        }
-
-        return statefulProcessorNode;
     }
 
     @SuppressWarnings("unchecked")

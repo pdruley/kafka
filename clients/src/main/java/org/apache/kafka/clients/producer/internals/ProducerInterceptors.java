@@ -22,6 +22,7 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.record.RecordBatch;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -110,8 +111,7 @@ public class ProducerInterceptors<K, V> implements Closeable {
                     interceptor.onAcknowledgement(null, exception);
                 } else {
                     if (interceptTopicPartition == null) {
-                        interceptTopicPartition = new TopicPartition(record.topic(),
-                                record.partition() == null ? RecordMetadata.UNKNOWN_PARTITION : record.partition());
+                        interceptTopicPartition = extractTopicPartition(record);
                     }
                     interceptor.onAcknowledgement(new RecordMetadata(interceptTopicPartition, -1, -1,
                                     RecordBatch.NO_TIMESTAMP, -1, -1), exception);
@@ -121,6 +121,10 @@ public class ProducerInterceptors<K, V> implements Closeable {
                 log.warn("Error executing interceptor onAcknowledgement callback", e);
             }
         }
+    }
+
+    public static <K, V> TopicPartition extractTopicPartition(ProducerRecord<K, V> record) {
+        return new TopicPartition(record.topic(), record.partition() == null ? RecordMetadata.UNKNOWN_PARTITION : record.partition());
     }
 
     /**

@@ -19,7 +19,7 @@ package org.apache.kafka.streams.state.internals;
 import java.util.Objects;
 
 /**
- * This class is used in combination of {@link KeyAndJoinSide}. The {@link KeyAndJoinSide} class
+ * This class is used in combination of {@link TimestampedKeyAndJoinSide}. The {@link TimestampedKeyAndJoinSide} class
  * combines a key with a boolean value that specifies if the key is found in the left side of a
  * join or on the right side. This {@link LeftOrRightValue} object contains either the V1 value,
  * which is found in the left topic, or V2 value if it is found in the right topic.
@@ -63,26 +63,11 @@ public class LeftOrRightValue<V1, V2> {
         return new LeftOrRightValue<>(null, rightValue);
     }
 
-    /**
-     * Create a new {@link LeftOrRightValue} instance with the V value as {@code leftValue} if
-     * {@code isLeftSide} is True; otherwise {@code rightValue} if {@code isLeftSide} is False.
-     *
-     * @param value the V value (either V1 or V2 type)
-     * @param <V>   the type of the value
-     * @return a new {@link LeftOrRightValue} instance
-     */
-    public static <V> LeftOrRightValue make(final boolean isLeftSide, final V value) {
-        Objects.requireNonNull(value, "value is null");
-        return isLeftSide
-            ? LeftOrRightValue.makeLeftValue(value)
-            : LeftOrRightValue.makeRightValue(value);
-    }
-
-    public V1 getLeftValue() {
+    public V1 leftValue() {
         return leftValue;
     }
 
-    public V2 getRightValue() {
+    public V2 rightValue() {
         return rightValue;
     }
 

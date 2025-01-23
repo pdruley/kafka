@@ -35,9 +35,9 @@ import java.util.Set;
  */
 @InterfaceStability.Evolving
 public class ListTransactionsResult {
-    private final KafkaFutureImpl<Map<Integer, KafkaFutureImpl<Collection<TransactionListing>>>> future;
+    private final KafkaFuture<Map<Integer, KafkaFutureImpl<Collection<TransactionListing>>>> future;
 
-    ListTransactionsResult(KafkaFutureImpl<Map<Integer, KafkaFutureImpl<Collection<TransactionListing>>>> future) {
+    ListTransactionsResult(KafkaFuture<Map<Integer, KafkaFutureImpl<Collection<TransactionListing>>>> future) {
         this.future = future;
     }
 
@@ -103,7 +103,7 @@ public class ListTransactionsResult {
             }
 
             Set<Integer> remainingResponses = new HashSet<>(map.keySet());
-            map.forEach((brokerId, future) -> {
+            map.forEach((brokerId, future) ->
                 future.whenComplete((listings, brokerException) -> {
                     if (brokerException != null) {
                         allFuture.completeExceptionally(brokerException);
@@ -115,8 +115,8 @@ public class ListTransactionsResult {
                             allFuture.complete(allListingsMap);
                         }
                     }
-                });
-            });
+                })
+            );
         });
 
         return allFuture;

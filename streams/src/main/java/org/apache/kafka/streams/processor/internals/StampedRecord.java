@@ -19,9 +19,11 @@ package org.apache.kafka.streams.processor.internals;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.header.Headers;
 
-public class StampedRecord extends Stamped<ConsumerRecord<Object, Object>> {
+import java.util.Optional;
 
-    public StampedRecord(final ConsumerRecord<Object, Object> record, final long timestamp) {
+public class StampedRecord extends Stamped<ConsumerRecord<?, ?>> {
+
+    public StampedRecord(final ConsumerRecord<?, ?> record, final long timestamp) {
         super(record, timestamp);
     }
 
@@ -43,6 +45,10 @@ public class StampedRecord extends Stamped<ConsumerRecord<Object, Object>> {
 
     public long offset() {
         return value.offset();
+    }
+
+    public Optional<Integer> leaderEpoch() {
+        return value.leaderEpoch();
     }
 
     public Headers headers() {

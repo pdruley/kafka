@@ -76,6 +76,10 @@ public class JoinWindows extends Windows<Window> {
 
     private final long graceMs;
 
+    /**
+     * Enable left/outer stream-stream join, by not emitting left/outer results eagerly, but only after the grace period passed.
+     * This flag can only be enabled via ofTimeDifferenceAndGrace or ofTimeDifferenceWithNoGrace.
+     */
     protected final boolean enableSpuriousResultFix;
 
     protected JoinWindows(final JoinWindows joinWindows) {
@@ -114,7 +118,7 @@ public class JoinWindows extends Windows<Window> {
      * @param afterWindowEnd The grace period to admit out-of-order events to a window.
      * @return A new JoinWindows object with the specified window definition and grace period
      * @throws IllegalArgumentException if {@code timeDifference} is negative or can't be represented as {@code long milliseconds}
-     *                                  if the {@code afterWindowEnd} is negative or can't be represented as {@code long milliseconds}
+     *                                  if {@code afterWindowEnd} is negative or can't be represented as {@code long milliseconds}
      */
     public static JoinWindows ofTimeDifferenceAndGrace(final Duration timeDifference, final Duration afterWindowEnd) {
         final String timeDifferenceMsgPrefix = prepareMillisCheckFailMsgPrefix(timeDifference, "timeDifference");
@@ -150,7 +154,7 @@ public class JoinWindows extends Windows<Window> {
      * @param timeDifference join window interval
      * @return a new JoinWindows object with the window definition with and grace period (default to 24 hours minus {@code timeDifference})
      * @throws IllegalArgumentException if {@code timeDifference} is negative or can't be represented as {@code long milliseconds}
-     * @deprecated since 3.0. Use {@link #ofTimeDifferenceWithNoGrace(Duration)}} instead
+     * @deprecated Since 3.0. Use {@link #ofTimeDifferenceWithNoGrace(Duration)}} instead.
      */
     @Deprecated
     public static JoinWindows of(final Duration timeDifference) throws IllegalArgumentException {
@@ -216,11 +220,17 @@ public class JoinWindows extends Windows<Window> {
      * @param afterWindowEnd The grace period to admit out-of-order events to a window.
      * @return this updated builder
      * @throws IllegalArgumentException if the {@code afterWindowEnd} is negative or can't be represented as {@code long milliseconds}
-     * @deprecated since 3.0. Use {@link #ofTimeDifferenceAndGrace(Duration, Duration)} instead
+     * @throws IllegalStateException if {@link #grace(Duration)} is called after {@link #ofTimeDifferenceAndGrace(Duration, Duration)} or {@link #ofTimeDifferenceWithNoGrace(Duration)}
+     * @deprecated Since 3.0. Use {@link #ofTimeDifferenceAndGrace(Duration, Duration)} instead.
      */
     @Deprecated
     public JoinWindows grace(final Duration afterWindowEnd) throws IllegalArgumentException {
-        //TODO KAFKA-13021: disallow calling grace() if it was already set via ofTimeDifferenceAndGrace/WithNoGrace()
+        // re-use the enableSpuriousResultFix flag to identify if grace is called after ofTimeDifferenceAndGrace/ofTimeDifferenceWithNoGrace
+        if (this.enableSpuriousResultFix) {
+            throw new IllegalStateException(
+                "Cannot call grace() after setting grace value via ofTimeDifferenceAndGrace or ofTimeDifferenceWithNoGrace.");
+        }
+
         final String msgPrefix = prepareMillisCheckFailMsgPrefix(afterWindowEnd, "afterWindowEnd");
         final long afterWindowEndMs = validateMillisecondDuration(afterWindowEnd, msgPrefix);
         return new JoinWindows(beforeMs, afterMs, afterWindowEndMs, false);

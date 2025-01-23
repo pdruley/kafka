@@ -20,12 +20,12 @@ package org.apache.kafka.connect.runtime.rest;
 import org.apache.kafka.connect.health.ConnectClusterState;
 import org.apache.kafka.connect.rest.ConnectRestExtensionContext;
 
-import javax.ws.rs.core.Configurable;
+import jakarta.ws.rs.core.Configurable;
 
 public class ConnectRestExtensionContextImpl implements ConnectRestExtensionContext {
 
-    private Configurable<? extends Configurable<?>> configurable;
-    private ConnectClusterState clusterState;
+    private final Configurable<? extends Configurable<?>> configurable;
+    private final ConnectClusterState clusterState;
 
     public ConnectRestExtensionContextImpl(
         Configurable<? extends Configurable<?>> configurable,

@@ -136,27 +136,6 @@ public final class TimeWindows extends Windows<TimeWindow> {
     }
 
     /**
-     * Return a window definition with the given window size, and with the advance interval being equal to the window
-     * size.
-     * The time interval represented by the N-th window is: {@code [N * size, N * size + size)}.
-     * <p>
-     * This provides the semantics of tumbling windows, which are fixed-sized, gap-less, non-overlapping windows.
-     * Tumbling windows are a special case of hopping windows with {@code advance == size}.
-     *
-     * @param size The size of the window
-     * @return a new window definition without specifying the grace period (default to 24 hours minus window {@code size})
-     * @throws IllegalArgumentException if the specified window size is zero or negative or can't be represented as {@code long milliseconds}
-     * @deprecated since 3.0. Use {@link #ofSizeWithNoGrace(Duration)} } instead
-     */
-    @Deprecated
-    public static TimeWindows of(final Duration size) throws IllegalArgumentException {
-        final String msgPrefix = prepareMillisCheckFailMsgPrefix(size, "size");
-        final long sizeMs = validateMillisecondDuration(size, msgPrefix);
-
-        return new TimeWindows(sizeMs, sizeMs, Math.max(DEPRECATED_DEFAULT_24_HR_GRACE_PERIOD - sizeMs, 0));
-    }
-
-    /**
      * Return a window definition with the original size, but advance ("hop") the window by the given interval, which
      * specifies by how much a window moves forward relative to the previous one.
      * The time interval represented by the N-th window is: {@code [N * advance, N * advance + size)}.
@@ -188,26 +167,6 @@ public final class TimeWindows extends Windows<TimeWindow> {
     @Override
     public long size() {
         return sizeMs;
-    }
-
-    /**
-     * Reject out-of-order events that arrive more than {@code millisAfterWindowEnd}
-     * after the end of its window.
-     * <p>
-     * Delay is defined as (stream_time - record_timestamp).
-     *
-     * @param afterWindowEnd The grace period to admit out-of-order events to a window.
-     * @return this updated builder
-     * @throws IllegalArgumentException if {@code afterWindowEnd} is negative or can't be represented as {@code long milliseconds}
-     * @deprecated since 3.0. Use {@link #ofSizeAndGrace(Duration, Duration)} instead
-     */
-    @Deprecated
-    public TimeWindows grace(final Duration afterWindowEnd) throws IllegalArgumentException {
-        //TODO KAFKA-13021: disallow calling grace() if it was already set via ofTimeDifferenceAndGrace/WithNoGrace()
-        final String msgPrefix = prepareMillisCheckFailMsgPrefix(afterWindowEnd, "afterWindowEnd");
-        final long afterWindowEndMs = validateMillisecondDuration(afterWindowEnd, msgPrefix);
-
-        return new TimeWindows(sizeMs, advanceMs, afterWindowEndMs);
     }
 
     @Override

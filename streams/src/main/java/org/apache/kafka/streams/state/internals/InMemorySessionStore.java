@@ -20,15 +20,24 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.KeyValue;
+import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.kstream.Windowed;
 import org.apache.kafka.streams.kstream.internals.SessionWindow;
-import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.processor.StateStore;
+import org.apache.kafka.streams.processor.StateStoreContext;
+import org.apache.kafka.streams.processor.internals.ChangelogRecordDeserializationHelper;
 import org.apache.kafka.streams.processor.internals.InternalProcessorContext;
+import org.apache.kafka.streams.processor.internals.RecordBatchingStateRestoreCallback;
 import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
 import org.apache.kafka.streams.processor.internals.metrics.TaskMetrics;
+import org.apache.kafka.streams.query.Position;
+import org.apache.kafka.streams.query.PositionBound;
+import org.apache.kafka.streams.query.Query;
+import org.apache.kafka.streams.query.QueryConfig;
+import org.apache.kafka.streams.query.QueryResult;
 import org.apache.kafka.streams.state.KeyValueIterator;
 import org.apache.kafka.streams.state.SessionStore;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,6 +51,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 
+import static org.apache.kafka.streams.StreamsConfig.InternalConfig.IQ_CONSISTENCY_OFFSET_VECTOR_ENABLED;
+
 public class InMemorySessionStore implements SessionStore<Bytes, byte[]> {
 
     private static final Logger LOG = LoggerFactory.getLogger(InMemorySessionStore.class);
@@ -54,10 +65,19 @@ public class InMemorySessionStore implements SessionStore<Bytes, byte[]> {
 
     private final long retentionPeriod;
 
+    private static final String INVALID_RANGE_WARN_MSG =
+        "Returning empty iterator for fetch with invalid key range: from > to. " +
+        "This may be due to range arguments set in the wrong order, " +
+        "or serdes that don't preserve ordering when lexicographically comparing the serialized bytes. " +
+        "Note that the built-in numerical serdes do not follow this for negative numbers";
+
     private final ConcurrentNavigableMap<Long, ConcurrentNavigableMap<Bytes, ConcurrentNavigableMap<Long, byte[]>>> endTimeMap = new ConcurrentSkipListMap<>();
     private final Set<InMemorySessionStoreIterator> openIterators  = ConcurrentHashMap.newKeySet();
 
     private volatile boolean open = false;
+
+    private StateStoreContext stateStoreContext;
+    private final Position position;
 
     InMemorySessionStore(final String name,
                          final long retentionPeriod,
@@ -65,6 +85,7 @@ public class InMemorySessionStore implements SessionStore<Bytes, byte[]> {
         this.name = name;
         this.retentionPeriod = retentionPeriod;
         this.metricScope = metricScope;
+        this.position = Position.emptyPosition();
     }
 
     @Override
@@ -72,16 +93,17 @@ public class InMemorySessionStore implements SessionStore<Bytes, byte[]> {
         return name;
     }
 
-    @Deprecated
     @Override
-    public void init(final ProcessorContext context, final StateStore root) {
+    public void init(final StateStoreContext stateStoreContext,
+                     final StateStore root) {
+        this.stateStoreContext = stateStoreContext;
         final String threadId = Thread.currentThread().getName();
-        final String taskName = context.taskId().toString();
+        final String taskName = stateStoreContext.taskId().toString();
 
         // The provided context is not required to implement InternalProcessorContext,
         // If it doesn't, we can't record this metric.
-        if (context instanceof InternalProcessorContext) {
-            this.context = (InternalProcessorContext) context;
+        if (stateStoreContext instanceof InternalProcessorContext) {
+            this.context = (InternalProcessorContext) stateStoreContext;
             final StreamsMetricsImpl metrics = this.context.metrics();
             expiredRecordSensor = TaskMetrics.droppedRecordsSensor(
                 threadId,
@@ -94,9 +116,33 @@ public class InMemorySessionStore implements SessionStore<Bytes, byte[]> {
         }
 
         if (root != null) {
-            context.register(root, (key, value) -> put(SessionKeySchema.from(Bytes.wrap(key)), value));
+            final boolean consistencyEnabled = StreamsConfig.InternalConfig.getBoolean(
+                stateStoreContext.appConfigs(),
+                IQ_CONSISTENCY_OFFSET_VECTOR_ENABLED,
+                false
+            );
+            stateStoreContext.register(
+                root,
+                (RecordBatchingStateRestoreCallback) records -> {
+                    synchronized (position) {
+                        for (final ConsumerRecord<byte[], byte[]> record : records) {
+                            put(SessionKeySchema.from(Bytes.wrap(record.key())), record.value());
+                            ChangelogRecordDeserializationHelper.applyChecksAndUpdatePosition(
+                                record,
+                                consistencyEnabled,
+                                position
+                            );
+                        }
+                    }
+                }
+            );
         }
         open = true;
+    }
+
+    @Override
+    public Position getPosition() {
+        return position;
     }
 
     @Override
@@ -106,22 +152,26 @@ public class InMemorySessionStore implements SessionStore<Bytes, byte[]> {
         final long windowEndTimestamp = sessionKey.window().end();
         observedStreamTime = Math.max(observedStreamTime, windowEndTimestamp);
 
-        if (windowEndTimestamp <= observedStreamTime - retentionPeriod) {
-            // The provided context is not required to implement InternalProcessorContext,
-            // If it doesn't, we can't record this metric (in fact, we wouldn't have even initialized it).
-            if (expiredRecordSensor != null && context != null) {
-                expiredRecordSensor.record(1.0d, context.currentSystemTimeMs());
-            }
-            LOG.warn("Skipping record for expired segment.");
-        } else {
-            if (aggregate != null) {
-                endTimeMap.computeIfAbsent(windowEndTimestamp, t -> new ConcurrentSkipListMap<>());
-                final ConcurrentNavigableMap<Bytes, ConcurrentNavigableMap<Long, byte[]>> keyMap = endTimeMap.get(windowEndTimestamp);
-                keyMap.computeIfAbsent(sessionKey.key(), t -> new ConcurrentSkipListMap<>());
-                keyMap.get(sessionKey.key()).put(sessionKey.window().start(), aggregate);
+        synchronized (position) {
+            if (windowEndTimestamp <= observedStreamTime - retentionPeriod) {
+                // The provided context is not required to implement InternalProcessorContext,
+                // If it doesn't, we can't record this metric (in fact, we wouldn't have even initialized it).
+                if (expiredRecordSensor != null && context != null) {
+                    expiredRecordSensor.record(1.0d, context.currentSystemTimeMs());
+                }
+                LOG.warn("Skipping record for expired segment.");
             } else {
-                remove(sessionKey);
+                if (aggregate != null) {
+                    endTimeMap.computeIfAbsent(windowEndTimestamp, t -> new ConcurrentSkipListMap<>());
+                    final ConcurrentNavigableMap<Bytes, ConcurrentNavigableMap<Long, byte[]>> keyMap = endTimeMap.get(windowEndTimestamp);
+                    keyMap.computeIfAbsent(sessionKey.key(), t -> new ConcurrentSkipListMap<>());
+                    keyMap.get(sessionKey.key()).put(sessionKey.window().start(), aggregate);
+                } else {
+                    remove(sessionKey);
+                }
             }
+
+            StoreQueryUtils.updatePosition(position, stateStoreContext);
         }
     }
 
@@ -149,23 +199,34 @@ public class InMemorySessionStore implements SessionStore<Bytes, byte[]> {
 
     @Override
     public byte[] fetchSession(final Bytes key,
-                               final long earliestSessionEndTime,
-                               final long latestSessionStartTime) {
+                               final long sessionStartTime,
+                               final long sessionEndTime) {
         removeExpiredSegments();
 
         Objects.requireNonNull(key, "key cannot be null");
 
         // Only need to search if the record hasn't expired yet
-        if (latestSessionStartTime > observedStreamTime - retentionPeriod) {
-            final ConcurrentNavigableMap<Bytes, ConcurrentNavigableMap<Long, byte[]>> keyMap = endTimeMap.get(latestSessionStartTime);
+        if (sessionEndTime > observedStreamTime - retentionPeriod) {
+            final ConcurrentNavigableMap<Bytes, ConcurrentNavigableMap<Long, byte[]>> keyMap = endTimeMap.get(sessionEndTime);
             if (keyMap != null) {
                 final ConcurrentNavigableMap<Long, byte[]> startTimeMap = keyMap.get(key);
                 if (startTimeMap != null) {
-                    return startTimeMap.get(earliestSessionEndTime);
+                    return startTimeMap.get(sessionStartTime);
                 }
             }
         }
         return null;
+    }
+
+    @Override
+    public KeyValueIterator<Windowed<Bytes>, byte[]> findSessions(final long earliestSessionEndTime,
+                                                                  final long latestSessionEndTime) {
+        removeExpiredSegments();
+
+        final ConcurrentNavigableMap<Long, ConcurrentNavigableMap<Bytes, ConcurrentNavigableMap<Long, byte[]>>> endTimSubMap
+            = endTimeMap.subMap(earliestSessionEndTime, true, latestSessionEndTime, true);
+
+        return registerNewIterator(null, null, Long.MAX_VALUE, endTimSubMap.entrySet().iterator(), true);
     }
 
     @Override
@@ -205,16 +266,10 @@ public class InMemorySessionStore implements SessionStore<Bytes, byte[]> {
                                                                   final Bytes keyTo,
                                                                   final long earliestSessionEndTime,
                                                                   final long latestSessionStartTime) {
-        Objects.requireNonNull(keyFrom, "from key cannot be null");
-        Objects.requireNonNull(keyTo, "to key cannot be null");
-
         removeExpiredSegments();
 
-        if (keyFrom.compareTo(keyTo) > 0) {
-            LOG.warn("Returning empty iterator for fetch with invalid key range: from > to. " +
-                "This may be due to range arguments set in the wrong order, " +
-                "or serdes that don't preserve ordering when lexicographically comparing the serialized bytes. " +
-                "Note that the built-in numerical serdes do not follow this for negative numbers");
+        if (keyFrom != null && keyTo != null && keyFrom.compareTo(keyTo) > 0) {
+            LOG.warn(INVALID_RANGE_WARN_MSG);
             return KeyValueIterators.emptyIterator();
         }
 
@@ -230,16 +285,10 @@ public class InMemorySessionStore implements SessionStore<Bytes, byte[]> {
                                                                           final Bytes keyTo,
                                                                           final long earliestSessionEndTime,
                                                                           final long latestSessionStartTime) {
-        Objects.requireNonNull(keyFrom, "from key cannot be null");
-        Objects.requireNonNull(keyTo, "to key cannot be null");
-
         removeExpiredSegments();
 
-        if (keyFrom.compareTo(keyTo) > 0) {
-            LOG.warn("Returning empty iterator for fetch with invalid key range: from > to. " +
-                "This may be due to range arguments set in the wrong order, " +
-                "or serdes that don't preserve ordering when lexicographically comparing the serialized bytes. " +
-                "Note that the built-in numerical serdes do not follow this for negative numbers");
+        if (keyFrom != null && keyTo != null && keyFrom.compareTo(keyTo) > 0) {
+            LOG.warn(INVALID_RANGE_WARN_MSG);
             return KeyValueIterators.emptyIterator();
         }
 
@@ -274,25 +323,17 @@ public class InMemorySessionStore implements SessionStore<Bytes, byte[]> {
 
     @Override
     public KeyValueIterator<Windowed<Bytes>, byte[]> fetch(final Bytes keyFrom, final Bytes keyTo) {
-
-        Objects.requireNonNull(keyFrom, "from key cannot be null");
-        Objects.requireNonNull(keyTo, "to key cannot be null");
-
         removeExpiredSegments();
 
-
-        return registerNewIterator(keyFrom, keyTo, Long.MAX_VALUE, endTimeMap.entrySet().iterator(), false);
+        return registerNewIterator(keyFrom, keyTo, Long.MAX_VALUE, endTimeMap.entrySet().iterator(), true);
     }
 
     @Override
     public KeyValueIterator<Windowed<Bytes>, byte[]> backwardFetch(final Bytes keyFrom, final Bytes keyTo) {
-        Objects.requireNonNull(keyFrom, "from key cannot be null");
-        Objects.requireNonNull(keyTo, "to key cannot be null");
-
         removeExpiredSegments();
 
         return registerNewIterator(
-            keyFrom, keyTo, Long.MAX_VALUE, endTimeMap.descendingMap().entrySet().iterator(), true);
+            keyFrom, keyTo, Long.MAX_VALUE, endTimeMap.descendingMap().entrySet().iterator(), false);
     }
 
     @Override
@@ -303,6 +344,21 @@ public class InMemorySessionStore implements SessionStore<Bytes, byte[]> {
     @Override
     public boolean isOpen() {
         return open;
+    }
+
+    @Override
+    public <R> QueryResult<R> query(final Query<R> query,
+                                    final PositionBound positionBound,
+                                    final QueryConfig config) {
+
+        return StoreQueryUtils.handleBasicQueries(
+            query,
+            positionBound,
+            config,
+            this,
+            position,
+            context
+        );
     }
 
     @Override
@@ -457,17 +513,22 @@ public class InMemorySessionStore implements SessionStore<Bytes, byte[]> {
             while (endTimeIterator.hasNext()) {
                 final Entry<Long, ConcurrentNavigableMap<Bytes, ConcurrentNavigableMap<Long, byte[]>>> nextEndTimeEntry = endTimeIterator.next();
                 currentEndTime = nextEndTimeEntry.getKey();
-                if (forward) {
-                    keyIterator = nextEndTimeEntry.getValue()
-                                                  .subMap(keyFrom, true, keyTo, true)
-                                                  .entrySet()
-                                                  .iterator();
+
+                final ConcurrentNavigableMap<Bytes, ConcurrentNavigableMap<Long, byte[]>> subKVMap;
+                if (keyFrom == null && keyTo == null) {
+                    subKVMap = nextEndTimeEntry.getValue();
+                } else if (keyFrom == null) {
+                    subKVMap = nextEndTimeEntry.getValue().headMap(keyTo, true);
+                } else if (keyTo == null) {
+                    subKVMap = nextEndTimeEntry.getValue().tailMap(keyFrom, true);
                 } else {
-                    keyIterator = nextEndTimeEntry.getValue()
-                                                  .subMap(keyFrom, true, keyTo, true)
-                                                  .descendingMap()
-                                                  .entrySet()
-                                                  .iterator();
+                    subKVMap = nextEndTimeEntry.getValue().subMap(keyFrom, true, keyTo, true);
+                }
+
+                if (forward) {
+                    keyIterator = subKVMap.entrySet().iterator();
+                } else {
+                    keyIterator = subKVMap.descendingMap().entrySet().iterator();
                 }
 
                 if (setInnerIterators()) {

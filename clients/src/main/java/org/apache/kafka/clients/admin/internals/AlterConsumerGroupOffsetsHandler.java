@@ -16,15 +16,6 @@
  */
 package org.apache.kafka.clients.admin.internals;
 
-import static java.util.Collections.singleton;
-
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
-
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
@@ -35,13 +26,23 @@ import org.apache.kafka.common.message.OffsetCommitResponseData.OffsetCommitResp
 import org.apache.kafka.common.message.OffsetCommitResponseData.OffsetCommitResponseTopic;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.requests.AbstractResponse;
+import org.apache.kafka.common.requests.FindCoordinatorRequest.CoordinatorType;
 import org.apache.kafka.common.requests.OffsetCommitRequest;
 import org.apache.kafka.common.requests.OffsetCommitResponse;
-import org.apache.kafka.common.requests.FindCoordinatorRequest.CoordinatorType;
 import org.apache.kafka.common.utils.LogContext;
+
 import org.slf4j.Logger;
 
-public class AlterConsumerGroupOffsetsHandler implements AdminApiHandler<CoordinatorKey, Map<TopicPartition, Errors>> {
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
+import static java.util.Collections.singleton;
+
+public class AlterConsumerGroupOffsetsHandler extends AdminApiHandler.Batched<CoordinatorKey, Map<TopicPartition, Errors>> {
 
     private final CoordinatorKey groupId;
     private final Map<TopicPartition, OffsetAndMetadata> offsets;
@@ -83,7 +84,7 @@ public class AlterConsumerGroupOffsetsHandler implements AdminApiHandler<Coordin
     }
 
     @Override
-    public OffsetCommitRequest.Builder buildRequest(
+    public OffsetCommitRequest.Builder buildBatchedRequest(
         int coordinatorId,
         Set<CoordinatorKey> groupIds
     ) {
@@ -159,26 +160,30 @@ public class AlterConsumerGroupOffsetsHandler implements AdminApiHandler<Coordin
         Set<CoordinatorKey> groupsToRetry
     ) {
         switch (error) {
-            // If the coordinator is in the middle of loading, then we just need to retry.
+            // If the coordinator is in the middle of loading, or rebalance is in progress, then we just need to retry.
             case COORDINATOR_LOAD_IN_PROGRESS:
-                log.debug("OffsetCommit request for group id {} failed because the coordinator" +
-                    " is still in the process of loading state. Will retry.", groupId.idValue);
+            case REBALANCE_IN_PROGRESS:
+                log.debug("OffsetCommit request for group id {} returned error {}. Will retry.",
+                    groupId.idValue, error);
                 groupsToRetry.add(groupId);
                 break;
 
             // If the coordinator is not available, then we unmap and retry.
             case COORDINATOR_NOT_AVAILABLE:
             case NOT_COORDINATOR:
-                log.debug("OffsetCommit request for group id {} returned error {}. Will retry.",
+                log.debug("OffsetCommit request for group id {} returned error {}. Will rediscover the coordinator and retry.",
                     groupId.idValue, error);
                 groupsToUnmap.add(groupId);
                 break;
 
             // Group level errors.
             case INVALID_GROUP_ID:
-            case REBALANCE_IN_PROGRESS:
             case INVALID_COMMIT_OFFSET_SIZE:
             case GROUP_AUTHORIZATION_FAILED:
+            case GROUP_ID_NOT_FOUND:
+            // Member level errors.
+            case UNKNOWN_MEMBER_ID:
+            case STALE_MEMBER_EPOCH:
                 log.debug("OffsetCommit request for group id {} failed due to error {}.",
                     groupId.idValue, error);
                 partitionResults.put(topicPartition, error);

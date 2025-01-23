@@ -19,9 +19,10 @@ package org.apache.kafka.streams.processor.internals;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.errors.TimeoutException;
+import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.streams.errors.LockException;
 import org.apache.kafka.streams.errors.StreamsException;
+import org.apache.kafka.streams.errors.TaskCorruptedException;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.TaskId;
 
@@ -103,6 +104,7 @@ public interface Task {
     // idempotent life-cycle methods
 
     /**
+     * @throws TaskCorruptedException if the state cannot be reused (with EOS) and needs to be reset
      * @throws LockException    could happen when multi-threads within the single instance, could retry
      * @throws StreamsException fatal error, should close the thread
      */
@@ -142,6 +144,12 @@ public interface Task {
      */
     void updateInputPartitions(final Set<TopicPartition> topicPartitions, final Map<String, List<String>> allTopologyNodesToSourceTopics);
 
+    /**
+     * @param enforceCheckpoint if true the task would always execute the checkpoint;
+     *                          otherwise it may skip if the state has not advanced much
+     */
+    void maybeCheckpoint(final boolean enforceCheckpoint);
+
     void markChangelogAsCorrupted(final Collection<TopicPartition> partitions);
 
     /**
@@ -150,14 +158,27 @@ public interface Task {
     void revive();
 
     /**
-     * Attempt a clean close but do not close the underlying state
+     * Close the task except the state, so that the states can be later recycled
      */
-    void closeCleanAndRecycleState();
+    void prepareRecycle();
 
+    /**
+     * Resumes polling in the main consumer for all partitions for which
+     * the corresponding record queues have capacity (again).
+     */
+    void resumePollingForPartitionsWithAvailableSpace();
+
+    /**
+     * Fetches up-to-date lag information from the consumer.
+     */
+    void updateLags();
 
     // runtime methods (using in RUNNING state)
 
     void addRecords(TopicPartition partition, Iterable<ConsumerRecord<byte[], byte[]>> records);
+
+    default void updateNextOffsets(final TopicPartition partition, final OffsetAndMetadata offsetAndMetadata) {
+    }
 
     default boolean process(final long wallClockTime) {
         return false;
@@ -189,13 +210,14 @@ public interface Task {
     }
 
     /**
-     * @throws TimeoutException if {@code currentWallClockMs > task-timeout-deadline}
+     * @throws StreamsException if {@code currentWallClockMs > task-timeout-deadline}
      */
     void maybeInitTaskTimeoutOrThrow(final long currentWallClockMs,
                                      final Exception cause);
 
     void clearTaskTimeout();
 
+    void recordRestoration(final Time time, final long numRecords, final boolean initRemaining);
 
     // task status inquiry
 
@@ -208,9 +230,11 @@ public interface Task {
     /**
      * @return any changelog partitions associated with this task
      */
-    Collection<TopicPartition> changelogPartitions();
+    Set<TopicPartition> changelogPartitions();
 
     State state();
+
+    ProcessorStateManager stateManager();
 
     default boolean needsInitializationOrRestoration() {
         return state() == State.CREATED || state() == State.RESTORING;
@@ -225,7 +249,7 @@ public interface Task {
 
     // IQ related methods
 
-    StateStore getStore(final String name);
+    StateStore store(final String name);
 
     /**
      * @return the offsets of all the changelog partitions associated with this task,
@@ -248,4 +272,5 @@ public interface Task {
      * @return This returns the time the task started idling. If it is not idling it returns empty.
      */
     Optional<Long> timeCurrentIdlingStarted();
+
 }

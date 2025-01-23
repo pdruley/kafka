@@ -18,17 +18,17 @@ package org.apache.kafka.connect.mirror;
 
 import org.apache.kafka.common.Configurable;
 
-import java.util.Collections;
-import java.util.List;
-import java.util.Set;
-import java.util.HashSet;
-import java.util.Arrays;
-
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class MirrorClientTest {
 
@@ -197,7 +197,7 @@ public class MirrorClientTest {
     @Test
     public void testIdentityReplicationTopicSource() {
         MirrorClient client = new FakeMirrorClient(
-            identityReplicationPolicy("primary"), Arrays.asList());
+            identityReplicationPolicy("primary"), Collections.emptyList());
         assertEquals("topic1", client.replicationPolicy()
             .formatRemoteTopic("primary", "topic1"));
         assertEquals("primary", client.replicationPolicy()

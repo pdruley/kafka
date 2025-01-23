@@ -18,7 +18,6 @@ package org.apache.kafka.streams.state.internals;
 
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.kstream.Windowed;
-import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.StateStoreContext;
 import org.apache.kafka.streams.processor.internals.InternalProcessorContext;
@@ -34,15 +33,15 @@ import static org.apache.kafka.streams.processor.internals.ProcessorContextUtils
  * updates to a changelog
  */
 class ChangeLoggingWindowBytesStore
-    extends WrappedStateStore<WindowStore<Bytes, byte[]>, byte[], byte[]>
-    implements WindowStore<Bytes, byte[]> {
+        extends WrappedStateStore<WindowStore<Bytes, byte[]>, byte[], byte[]>
+        implements WindowStore<Bytes, byte[]> {
 
     interface ChangeLoggingKeySerializer {
         Bytes serialize(final Bytes key, final long timestamp, final int seqnum);
     }
 
     private final boolean retainDuplicates;
-    InternalProcessorContext context;
+    InternalProcessorContext<?, ?> internalContext;
     private int seqnum = 0;
     private final ChangeLoggingKeySerializer keySerializer;
 
@@ -54,19 +53,11 @@ class ChangeLoggingWindowBytesStore
         this.keySerializer = requireNonNull(keySerializer, "keySerializer");
     }
 
-    @Deprecated
     @Override
-    public void init(final ProcessorContext context,
+    public void init(final StateStoreContext stateStoreContext,
                      final StateStore root) {
-        this.context = asInternalProcessorContext(context);
-        super.init(context, root);
-    }
-
-    @Override
-    public void init(final StateStoreContext context,
-                     final StateStore root) {
-        this.context = asInternalProcessorContext(context);
-        super.init(context, root);
+        internalContext = asInternalProcessorContext(stateStoreContext);
+        super.init(stateStoreContext, root);
     }
 
     @Override
@@ -133,12 +124,12 @@ class ChangeLoggingWindowBytesStore
                     final byte[] value,
                     final long windowStartTimestamp) {
         wrapped().put(key, value, windowStartTimestamp);
+
         log(keySerializer.serialize(key, windowStartTimestamp, maybeUpdateSeqnumForDups()), value);
     }
 
-    void log(final Bytes key,
-             final byte[] value) {
-        context.logChange(name(), key, value, context.timestamp());
+    void log(final Bytes key, final byte[] value) {
+        internalContext.logChange(name(), key, value, internalContext.timestamp(), wrapped().getPosition());
     }
 
     private int maybeUpdateSeqnumForDups() {

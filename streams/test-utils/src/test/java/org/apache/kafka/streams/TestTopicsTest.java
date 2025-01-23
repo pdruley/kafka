@@ -28,11 +28,10 @@ import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.Produced;
 import org.apache.kafka.streams.test.TestRecord;
+
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -54,12 +53,10 @@ import static org.hamcrest.Matchers.hasProperty;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class TestTopicsTest {
-    private static final Logger log = LoggerFactory.getLogger(TestTopicsTest.class);
-
-    private final static String INPUT_TOPIC = "input";
-    private final static String OUTPUT_TOPIC = "output1";
-    private final static String INPUT_TOPIC_MAP = OUTPUT_TOPIC;
-    private final static String OUTPUT_TOPIC_MAP = "output2";
+    private static final String INPUT_TOPIC = "input";
+    private static final String OUTPUT_TOPIC = "output1";
+    private static final String INPUT_TOPIC_MAP = OUTPUT_TOPIC;
+    private static final String OUTPUT_TOPIC_MAP = "output2";
 
     private TopologyTestDriver testDriver;
     private final Serde<String> stringSerde = new Serdes.StringSerde();
@@ -84,13 +81,7 @@ public class TestTopicsTest {
 
     @AfterEach
     public void tearDown() {
-        try {
-            testDriver.close();
-        } catch (final RuntimeException e) {
-            // https://issues.apache.org/jira/browse/KAFKA-6647 causes exception when executed in Windows, ignoring it
-            // Logged stacktrace cannot be avoided
-            log.warn("Ignoring exception, test failing in Windows due this exception: {}", e.getLocalizedMessage());
-        }
+        testDriver.close();
     }
 
     @Test
@@ -180,7 +171,6 @@ public class TestTopicsTest {
         inputTopic.pipeInput("value");
         assertThrows(IllegalStateException.class, outputTopic::readKeyValuesToMap);
     }
-
 
     @Test
     public void testKeyValueListDuration() {

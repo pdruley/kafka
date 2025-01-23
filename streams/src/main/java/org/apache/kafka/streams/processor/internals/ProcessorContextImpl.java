@@ -17,6 +17,9 @@
 package org.apache.kafka.streams.processor.internals;
 
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.header.Headers;
+import org.apache.kafka.common.header.internals.RecordHeader;
+import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.errors.StreamsException;
@@ -26,9 +29,12 @@ import org.apache.kafka.streams.processor.Punctuator;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.To;
+import org.apache.kafka.streams.processor.api.FixedKeyRecord;
 import org.apache.kafka.streams.processor.api.Record;
 import org.apache.kafka.streams.processor.internals.Task.TaskType;
 import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
+import org.apache.kafka.streams.query.Position;
+import org.apache.kafka.streams.state.internals.PositionSerde;
 import org.apache.kafka.streams.state.internals.ThreadCache;
 import org.apache.kafka.streams.state.internals.ThreadCache.DirtyEntryFlushListener;
 
@@ -37,17 +43,19 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.apache.kafka.streams.StreamsConfig.InternalConfig.IQ_CONSISTENCY_OFFSET_VECTOR_ENABLED;
 import static org.apache.kafka.streams.internals.ApiUtils.prepareMillisCheckFailMsgPrefix;
 import static org.apache.kafka.streams.internals.ApiUtils.validateMillisecondDuration;
 import static org.apache.kafka.streams.processor.internals.AbstractReadOnlyDecorator.getReadOnlyStore;
-import static org.apache.kafka.streams.processor.internals.AbstractReadWriteDecorator.getReadWriteStore;
+import static org.apache.kafka.streams.processor.internals.AbstractReadWriteDecorator.wrapWithReadWriteStore;
 
-public class ProcessorContextImpl extends AbstractProcessorContext<Object, Object> implements RecordCollector.Supplier {
+public final class ProcessorContextImpl extends AbstractProcessorContext<Object, Object> implements RecordCollector.Supplier {
     // the below are null for standby tasks
     private StreamTask streamTask;
     private RecordCollector collector;
 
     private final ProcessorStateManager stateManager;
+    private final boolean consistencyEnabled;
 
     final Map<String, DirtyEntryFlushListener> cacheNameToFlushListener = new HashMap<>();
 
@@ -58,6 +66,10 @@ public class ProcessorContextImpl extends AbstractProcessorContext<Object, Objec
                                 final ThreadCache cache) {
         super(id, config, metrics, cache);
         stateManager = stateMgr;
+        consistencyEnabled = StreamsConfig.InternalConfig.getBoolean(
+                appConfigs(),
+                IQ_CONSISTENCY_OFFSET_VECTOR_ENABLED,
+                false);
     }
 
     @Override
@@ -110,22 +122,34 @@ public class ProcessorContextImpl extends AbstractProcessorContext<Object, Objec
     public void logChange(final String storeName,
                           final Bytes key,
                           final byte[] value,
-                          final long timestamp) {
+                          final long timestamp,
+                          final Position position) {
         throwUnsupportedOperationExceptionIfStandby("logChange");
 
         final TopicPartition changelogPartition = stateManager().registeredChangelogPartitionFor(storeName);
 
-        // Sending null headers to changelog topics (KIP-244)
+        final Headers headers;
+        if (!consistencyEnabled) {
+            headers = null;
+        } else {
+            // Add the vector clock to the header part of every record
+            headers = new RecordHeaders();
+            headers.add(ChangelogRecordDeserializationHelper.CHANGELOG_VERSION_HEADER_RECORD_CONSISTENCY);
+            headers.add(new RecordHeader(ChangelogRecordDeserializationHelper.CHANGELOG_POSITION_HEADER_KEY,
+                    PositionSerde.serialize(position).array()));
+        }
+
         collector.send(
             changelogPartition.topic(),
             key,
             value,
-            null,
+            headers,
             changelogPartition.partition(),
             timestamp,
             BYTES_KEY_SERIALIZER,
-            BYTEARRAY_VALUE_SERIALIZER
-        );
+            BYTEARRAY_VALUE_SERIALIZER,
+            null,
+            null);
     }
 
     /**
@@ -140,7 +164,7 @@ public class ProcessorContextImpl extends AbstractProcessorContext<Object, Objec
             throw new StreamsException("Accessing from an unknown node");
         }
 
-        final StateStore globalStore = stateManager.getGlobalStore(name);
+        final StateStore globalStore = stateManager.globalStore(name);
         if (globalStore != null) {
             return (S) getReadOnlyStore(globalStore);
         }
@@ -150,14 +174,14 @@ public class ProcessorContextImpl extends AbstractProcessorContext<Object, Objec
                 " as the store is not connected to the processor. If you add stores manually via '.addStateStore()' " +
                 "make sure to connect the added store to the processor by providing the processor name to " +
                 "'.addStateStore()' or connect them via '.connectProcessorAndStateStores()'. " +
-                "DSL users need to provide the store name to '.process()', '.transform()', or '.transformValues()' " +
+                "DSL users need to provide the store name to '.process()', '.processValues()', or '.transformValues()' " +
                 "to connect the store to the corresponding operator, or they can provide a StoreBuilder by implementing " +
                 "the stores() method on the Supplier itself. If you do not add stores manually, " +
                 "please file a bug report at https://issues.apache.org/jira/projects/KAFKA.");
         }
 
-        final StateStore store = stateManager.getStore(name);
-        return (S) getReadWriteStore(store);
+        final StateStore store = stateManager.store(name);
+        return (S) wrapWithReadWriteStore(store);
     }
 
     @Override
@@ -187,6 +211,19 @@ public class ProcessorContextImpl extends AbstractProcessorContext<Object, Objec
     }
 
     @Override
+    public <K, V> void forward(final FixedKeyRecord<K, V> record) {
+        forward(new Record<>(record.key(), record.value(), record.timestamp(), record.headers()));
+    }
+
+    @Override
+    public <K, V> void forward(final FixedKeyRecord<K, V> record, final String childName) {
+        forward(
+            new Record<>(record.key(), record.value(), record.timestamp(), record.headers()),
+            childName
+        );
+    }
+
+    @Override
     public <K, V> void forward(final Record<K, V> record) {
         forward(record, null);
     }
@@ -199,8 +236,8 @@ public class ProcessorContextImpl extends AbstractProcessorContext<Object, Objec
         final ProcessorNode<?, ?, ?, ?> previousNode = currentNode();
         if (previousNode == null) {
             throw new StreamsException("Current node is unknown. This can happen if 'forward()' is called " +
-                    "in an illegal scope. The root cause could be that a 'Processor' or 'Transformer' instance" +
-                    " is shared. To avoid this error, make sure that your suppliers return new instances " +
+                    "in an illegal scope. The root cause could be that a 'Processor' instance " +
+                    "is shared. To avoid this error, make sure that your suppliers return new instances " +
                     "each time 'get()' of Supplier is called and do not return the same object reference " +
                     "multiple times.");
         }
@@ -232,7 +269,7 @@ public class ProcessorContextImpl extends AbstractProcessorContext<Object, Objec
                     forwardInternal((ProcessorNode<K, V, ?, ?>) child, record);
                 }
             } else {
-                final ProcessorNode<?, ?, ?, ?> child = currentNode().getChild(childName);
+                final ProcessorNode<?, ?, ?, ?> child = currentNode().child(childName);
                 if (child == null) {
                     throw new StreamsException("Unknown downstream node: " + childName
                                                    + " either does not exist or is not connected to this processor.");

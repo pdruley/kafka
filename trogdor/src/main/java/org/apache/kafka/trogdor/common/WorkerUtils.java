@@ -36,7 +36,7 @@ import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
 import org.apache.kafka.common.internals.KafkaFutureImpl;
 import org.apache.kafka.common.requests.CreateTopicsRequest;
 import org.apache.kafka.common.utils.Time;
-import org.apache.kafka.common.utils.Utils;
+
 import org.slf4j.Logger;
 
 import java.util.ArrayList;
@@ -226,7 +226,7 @@ public final class WorkerUtils {
             }
             if (Time.SYSTEM.milliseconds() > startMs + CREATE_TOPICS_CALL_TIMEOUT) {
                 String str = "Unable to create topic(s): " +
-                             Utils.join(topicsToCreate, ", ") + "after " + tries + " attempt(s)";
+                             String.join(", ", topicsToCreate) + "after " + tries + " attempt(s)";
                 log.warn(str);
                 throw new TimeoutException(str);
             }
@@ -279,7 +279,7 @@ public final class WorkerUtils {
             try {
                 DescribeTopicsResult topicsResult = adminClient.describeTopics(
                         topicsToVerify, new DescribeTopicsOptions().timeoutMs(ADMIN_REQUEST_TIMEOUT));
-                return topicsResult.all().get();
+                return topicsResult.allTopicNames().get();
             } catch (ExecutionException exception) {
                 if (exception.getCause() instanceof UnknownTopicOrPartitionException) {
                     lastException = (UnknownTopicOrPartitionException) exception.getCause();
@@ -321,7 +321,7 @@ public final class WorkerUtils {
         List<TopicPartition> out = new ArrayList<>();
         DescribeTopicsResult topicsResult = adminClient.describeTopics(
             matchedTopics, new DescribeTopicsOptions().timeoutMs(ADMIN_REQUEST_TIMEOUT));
-        Map<String, TopicDescription> topicDescriptionMap = topicsResult.all().get();
+        Map<String, TopicDescription> topicDescriptionMap = topicsResult.allTopicNames().get();
         for (TopicDescription desc: topicDescriptionMap.values()) {
             List<TopicPartitionInfo> partitions = desc.partitions();
             for (TopicPartitionInfo info: partitions) {
@@ -333,7 +333,7 @@ public final class WorkerUtils {
         return out;
     }
 
-    private static Admin createAdminClient(
+    public static Admin createAdminClient(
         String bootstrapServers,
         Map<String, String> commonClientConf, Map<String, String> adminClientConf) {
         Properties props = new Properties();

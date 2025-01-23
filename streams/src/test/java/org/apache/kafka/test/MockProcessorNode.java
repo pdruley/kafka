@@ -29,7 +29,7 @@ public class MockProcessorNode<KIn, VIn, KOut, VOut> extends ProcessorNode<KIn, 
     private static final String NAME = "MOCK-PROCESS-";
     private static final AtomicInteger INDEX = new AtomicInteger(1);
 
-    public final MockProcessor<KIn, VIn> mockProcessor;
+    public final MockProcessor<KIn, VIn, KOut, VOut> mockProcessor;
 
     public boolean closed;
     public boolean initialized;
@@ -46,8 +46,8 @@ public class MockProcessorNode<KIn, VIn, KOut, VOut> extends ProcessorNode<KIn, 
         this(new MockProcessor<>());
     }
 
-    private MockProcessorNode(final MockProcessor<KIn, VIn> mockProcessor) {
-        super(NAME + INDEX.getAndIncrement(), mockProcessor, Collections.<String>emptySet());
+    private MockProcessorNode(final MockProcessor<KIn, VIn, KOut, VOut> mockProcessor) {
+        super(NAME + INDEX.getAndIncrement(), mockProcessor, Collections.emptySet());
 
         this.mockProcessor = mockProcessor;
     }
@@ -60,7 +60,7 @@ public class MockProcessorNode<KIn, VIn, KOut, VOut> extends ProcessorNode<KIn, 
 
     @Override
     public void process(final Record<KIn, VIn> record) {
-        processor().process(record);
+        mockProcessor.process(record);
     }
 
     @Override

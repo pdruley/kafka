@@ -17,22 +17,23 @@
 
 package kafka.server
 
-import kafka.utils._
 import org.apache.kafka.common.Uuid
+import org.apache.kafka.common.internals.Topic
 import org.apache.kafka.common.message.CreateTopicsRequestData
 import org.apache.kafka.common.message.CreateTopicsRequestData.CreatableTopicCollection
-import org.apache.kafka.common.protocol.ApiKeys
-import org.apache.kafka.common.protocol.Errors
+import org.apache.kafka.common.protocol.{ApiKeys, Errors}
 import org.apache.kafka.common.requests.CreateTopicsRequest
 import org.junit.jupiter.api.Assertions._
-import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 
 import scala.jdk.CollectionConverters._
 
 class CreateTopicsRequestTest extends AbstractCreateTopicsRequestTest {
 
-  @Test
-  def testValidCreateTopicsRequests(): Unit = {
+  @ParameterizedTest
+  @ValueSource(strings = Array("kraft"))
+  def testValidCreateTopicsRequests(quorum: String): Unit = {
     // Generated assignments
     validateValidCreateTopicsRequests(topicsReq(Seq(topicReq("topic1"))))
     validateValidCreateTopicsRequests(topicsReq(Seq(topicReq("topic2", replicationFactor = 3))))
@@ -60,10 +61,11 @@ class CreateTopicsRequestTest extends AbstractCreateTopicsRequestTest {
       topicReq("topic14", replicationFactor = -1, numPartitions = 2))))
   }
 
-  @Test
-  def testErrorCreateTopicsRequests(): Unit = {
+  @ParameterizedTest
+  @ValueSource(strings = Array("kraft"))
+  def testErrorCreateTopicsRequests(quorum: String): Unit = {
     val existingTopic = "existing-topic"
-    createTopic(existingTopic, 1, 1)
+    createTopic(existingTopic)
     // Basic
     validateErrorCreateTopicsRequests(topicsReq(Seq(topicReq(existingTopic))),
       Map(existingTopic -> error(Errors.TOPIC_ALREADY_EXISTS, Some("Topic 'existing-topic' already exists."))))
@@ -98,30 +100,11 @@ class CreateTopicsRequestTest extends AbstractCreateTopicsRequestTest {
       ), checkErrorMessage = false
     )
     validateTopicExists("partial-none")
-
-    // Timeout
-    // We don't expect a request to ever complete within 1ms. A timeout of 1 ms allows us to test the purgatory timeout logic.
-    validateErrorCreateTopicsRequests(topicsReq(Seq(
-      topicReq("error-timeout", numPartitions = 10, replicationFactor = 3)), timeout = 1),
-      Map("error-timeout" -> error(Errors.REQUEST_TIMED_OUT)), checkErrorMessage = false)
-    validateErrorCreateTopicsRequests(topicsReq(Seq(
-      topicReq("error-timeout-zero", numPartitions = 10, replicationFactor = 3)), timeout = 0),
-      Map("error-timeout-zero" -> error(Errors.REQUEST_TIMED_OUT)), checkErrorMessage = false)
-    // Negative timeouts are treated the same as 0
-    validateErrorCreateTopicsRequests(topicsReq(Seq(
-      topicReq("error-timeout-negative", numPartitions = 10, replicationFactor = 3)), timeout = -1),
-      Map("error-timeout-negative" -> error(Errors.REQUEST_TIMED_OUT)), checkErrorMessage = false)
-    // The topics should still get created eventually
-    TestUtils.waitForPartitionMetadata(servers, "error-timeout", 0)
-    TestUtils.waitForPartitionMetadata(servers, "error-timeout-zero", 0)
-    TestUtils.waitForPartitionMetadata(servers, "error-timeout-negative", 0)
-    validateTopicExists("error-timeout")
-    validateTopicExists("error-timeout-zero")
-    validateTopicExists("error-timeout-negative")
   }
 
-  @Test
-  def testInvalidCreateTopicsRequests(): Unit = {
+  @ParameterizedTest
+  @ValueSource(strings = Array("kraft"))
+  def testInvalidCreateTopicsRequests(quorum: String): Unit = {
     // Partitions/ReplicationFactor and ReplicaAssignment
     validateErrorCreateTopicsRequests(topicsReq(Seq(
       topicReq("bad-args-topic", numPartitions = 10, replicationFactor = 3,
@@ -134,15 +117,9 @@ class CreateTopicsRequestTest extends AbstractCreateTopicsRequestTest {
       Map("bad-args-topic" -> error(Errors.INVALID_REQUEST)), checkErrorMessage = false)
   }
 
-  @Test
-  def testNotController(): Unit = {
-    val req = topicsReq(Seq(topicReq("topic1")))
-    val response = sendCreateTopicRequest(req, notControllerSocketServer)
-    assertEquals(1, response.errorCounts().get(Errors.NOT_CONTROLLER))
-  }
-
-  @Test
-  def testCreateTopicsRequestVersions(): Unit = {
+  @ParameterizedTest
+  @ValueSource(strings = Array("kraft"))
+  def testCreateTopicsRequestVersions(quorum: String): Unit = {
     for (version <- ApiKeys.CREATE_TOPICS.oldestVersion to ApiKeys.CREATE_TOPICS.latestVersion) {
       val topic = s"topic_$version"
       val data = new CreateTopicsRequestData()
@@ -154,7 +131,7 @@ class CreateTopicsRequestTest extends AbstractCreateTopicsRequestTest {
       ).asJava.iterator()))
 
       val request = new CreateTopicsRequest.Builder(data).build(version.asInstanceOf[Short])
-      val response = sendCreateTopicRequest(request)
+      val response = sendCreateTopicRequest(request, adminSocketServer)
 
       val topicResponse = response.data.topics.find(topic)
       assertNotNull(topicResponse)
@@ -177,5 +154,15 @@ class CreateTopicsRequestTest extends AbstractCreateTopicsRequestTest {
       else
         assertEquals(Uuid.ZERO_UUID, topicResponse.topicId())
     }
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = Array("kraft"))
+  def testCreateClusterMetadataTopic(quorum: String): Unit = {
+    validateErrorCreateTopicsRequests(
+      topicsReq(Seq(topicReq(Topic.CLUSTER_METADATA_TOPIC_NAME))),
+      Map(Topic.CLUSTER_METADATA_TOPIC_NAME ->
+        error(Errors.INVALID_REQUEST, Some(s"Creation of internal topic ${Topic.CLUSTER_METADATA_TOPIC_NAME} is prohibited.")))
+    )
   }
 }

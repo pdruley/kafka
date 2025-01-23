@@ -16,10 +16,11 @@
  */
 package kafka.server
 
-import kafka.api.ApiVersion
 import org.apache.kafka.clients.NodeApiVersions
 import org.apache.kafka.common.message.ApiMessageType.ListenerType
 import org.apache.kafka.common.protocol.ApiKeys
+import org.apache.kafka.server.BrokerFeatures
+import org.apache.kafka.server.common.KRaftVersion
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.params.ParameterizedTest
@@ -29,26 +30,51 @@ import org.mockito.Mockito
 import scala.jdk.CollectionConverters._
 
 class ApiVersionManagerTest {
-  private val brokerFeatures = BrokerFeatures.createDefault()
-  private val featureCache = new FinalizedFeatureCache(brokerFeatures)
+  private val brokerFeatures = BrokerFeatures.createDefault(true)
+  private val metadataCache = MetadataCache.kRaftMetadataCache(1, () => KRaftVersion.LATEST_PRODUCTION)
 
   @ParameterizedTest
   @EnumSource(classOf[ListenerType])
   def testApiScope(apiScope: ListenerType): Unit = {
+    val forwardingManager = Mockito.mock(classOf[ForwardingManager])
     val versionManager = new DefaultApiVersionManager(
       listenerType = apiScope,
-      interBrokerProtocolVersion = ApiVersion.latestVersion,
-      forwardingManager = None,
-      features = brokerFeatures,
-      featureCache = featureCache
+      forwardingManager = forwardingManager,
+      brokerFeatures = brokerFeatures,
+      metadataCache = metadataCache,
+      enableUnstableLastVersion = true
     )
     assertEquals(ApiKeys.apisForListener(apiScope).asScala, versionManager.enabledApis)
-    assertTrue(ApiKeys.apisForListener(apiScope).asScala.forall(versionManager.isApiEnabled))
+    assertTrue(ApiKeys.apisForListener(apiScope).asScala.forall { apiKey =>
+      apiKey.allVersions.asScala.forall { version =>
+        versionManager.isApiEnabled(apiKey, version)
+      }
+    })
+  }
+
+  @ParameterizedTest
+  @EnumSource(classOf[ListenerType])
+  def testDisabledApis(apiScope: ListenerType): Unit = {
+    val forwardingManager = Mockito.mock(classOf[ForwardingManager])
+    val versionManager = new DefaultApiVersionManager(
+      listenerType = apiScope,
+      forwardingManager = forwardingManager,
+      brokerFeatures = brokerFeatures,
+      metadataCache = metadataCache,
+      enableUnstableLastVersion = false
+    )
+
+    ApiKeys.apisForListener(apiScope).forEach { apiKey =>
+      if (apiKey.messageType.latestVersionUnstable()) {
+        assertFalse(versionManager.isApiEnabled(apiKey, apiKey.latestVersion),
+          s"$apiKey version ${apiKey.latestVersion} should be disabled.")
+      }
+    }
   }
 
   @Test
   def testControllerApiIntersection(): Unit = {
-    val controllerMinVersion: Short = 1
+    val controllerMinVersion: Short = 3
     val controllerMaxVersion: Short = 5
 
     val forwardingManager = Mockito.mock(classOf[ForwardingManager])
@@ -61,13 +87,13 @@ class ApiVersionManagerTest {
 
     val versionManager = new DefaultApiVersionManager(
       listenerType = ListenerType.ZK_BROKER,
-      interBrokerProtocolVersion = ApiVersion.latestVersion,
-      forwardingManager = Some(forwardingManager),
-      features = brokerFeatures,
-      featureCache = featureCache
+      forwardingManager = forwardingManager,
+      brokerFeatures = brokerFeatures,
+      metadataCache = metadataCache,
+      enableUnstableLastVersion = true
     )
 
-    val apiVersionsResponse = versionManager.apiVersionResponse(throttleTimeMs = 0)
+    val apiVersionsResponse = versionManager.apiVersionResponse(throttleTimeMs = 0, false)
     val alterConfigVersion = apiVersionsResponse.data.apiKeys.find(ApiKeys.CREATE_TOPICS.id)
     assertNotNull(alterConfigVersion)
     assertEquals(controllerMinVersion, alterConfigVersion.minVersion)
@@ -75,41 +101,22 @@ class ApiVersionManagerTest {
   }
 
   @Test
-  def testEnvelopeEnabledWhenForwardingManagerPresent(): Unit = {
+  def testEnvelopeDisabledForKRaftBroker(): Unit = {
     val forwardingManager = Mockito.mock(classOf[ForwardingManager])
     Mockito.when(forwardingManager.controllerApiVersions).thenReturn(None)
 
     val versionManager = new DefaultApiVersionManager(
-      listenerType = ListenerType.ZK_BROKER,
-      interBrokerProtocolVersion = ApiVersion.latestVersion,
-      forwardingManager = Some(forwardingManager),
-      features = brokerFeatures,
-      featureCache = featureCache
+      listenerType = ListenerType.BROKER,
+      forwardingManager = forwardingManager,
+      brokerFeatures = brokerFeatures,
+      metadataCache = metadataCache,
+      enableUnstableLastVersion = true
     )
-    assertTrue(versionManager.isApiEnabled(ApiKeys.ENVELOPE))
-    assertTrue(versionManager.enabledApis.contains(ApiKeys.ENVELOPE))
-
-    val apiVersionsResponse = versionManager.apiVersionResponse(throttleTimeMs = 0)
-    val envelopeVersion = apiVersionsResponse.data.apiKeys.find(ApiKeys.ENVELOPE.id)
-    assertNotNull(envelopeVersion)
-    assertEquals(ApiKeys.ENVELOPE.oldestVersion, envelopeVersion.minVersion)
-    assertEquals(ApiKeys.ENVELOPE.latestVersion, envelopeVersion.maxVersion)
-  }
-
-  @Test
-  def testEnvelopeDisabledWhenForwardingManagerEmpty(): Unit = {
-    val versionManager = new DefaultApiVersionManager(
-      listenerType = ListenerType.ZK_BROKER,
-      interBrokerProtocolVersion = ApiVersion.latestVersion,
-      forwardingManager = None,
-      features = brokerFeatures,
-      featureCache = featureCache
-    )
-    assertFalse(versionManager.isApiEnabled(ApiKeys.ENVELOPE))
+    assertFalse(versionManager.isApiEnabled(ApiKeys.ENVELOPE, ApiKeys.ENVELOPE.latestVersion))
     assertFalse(versionManager.enabledApis.contains(ApiKeys.ENVELOPE))
 
-    val apiVersionsResponse = versionManager.apiVersionResponse(throttleTimeMs = 0)
-    assertNull(apiVersionsResponse.data.apiKeys.find(ApiKeys.ENVELOPE.id))
+    val apiVersionsResponse = versionManager.apiVersionResponse(throttleTimeMs = 0, false)
+    val envelopeVersion = apiVersionsResponse.data.apiKeys.find(ApiKeys.ENVELOPE.id)
+    assertNull(envelopeVersion)
   }
-
 }

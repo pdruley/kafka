@@ -17,17 +17,19 @@
 
 package kafka.server
 
-import kafka.admin.BrokerMetadata
-
-import kafka.server.metadata.KRaftMetadataCache
-import org.apache.kafka.common.{Cluster, Node, TopicPartition, Uuid}
-import org.apache.kafka.common.message.{MetadataResponseData, UpdateMetadataRequestData}
+import kafka.server.metadata.{ConfigRepository, KRaftMetadataCache}
+import org.apache.kafka.admin.BrokerMetadata
+import org.apache.kafka.common.message.{DescribeClientQuotasRequestData, DescribeClientQuotasResponseData, DescribeUserScramCredentialsRequestData, DescribeUserScramCredentialsResponseData, MetadataResponseData}
 import org.apache.kafka.common.network.ListenerName
+import org.apache.kafka.common.{Cluster, Node, TopicPartition, Uuid}
+import org.apache.kafka.metadata.LeaderAndIsr
+import org.apache.kafka.server.common.{FinalizedFeatures, KRaftVersion, MetadataVersion}
 
 import java.util
+import java.util.function.Supplier
+import scala.collection._
 
-trait MetadataCache {
-
+trait MetadataCache extends ConfigRepository {
   /**
    * Return topic metadata for a given set of topics and listener. See KafkaApis#handleTopicMetadataRequest for details
    * on the use of the two boolean flags.
@@ -54,11 +56,17 @@ trait MetadataCache {
 
   def getAliveBrokers(): Iterable[BrokerMetadata]
 
+  def getTopicId(topicName: String): Uuid
+
+  def getTopicName(topicId: Uuid): Option[String]
+
   def getAliveBrokerNode(brokerId: Int, listenerName: ListenerName): Option[Node]
 
   def getAliveBrokerNodes(listenerName: ListenerName): Iterable[Node]
 
-  def getPartitionInfo(topic: String, partitionId: Int): Option[UpdateMetadataRequestData.UpdateMetadataPartitionState]
+  def getBrokerNodes(listenerName: ListenerName): Iterable[Node]
+
+  def getLeaderAndIsr(topic: String, partitionId: Int): Option[LeaderAndIsr]
 
   /**
    * Return the number of partitions in the given topic, or None if the given topic does not exist.
@@ -82,21 +90,28 @@ trait MetadataCache {
 
   def getPartitionReplicaEndpoints(tp: TopicPartition, listenerName: ListenerName): Map[Int, Node]
 
-  def getControllerId: Option[Int]
-
   def getClusterMetadata(clusterId: String, listenerName: ListenerName): Cluster
 
   def contains(topic: String): Boolean
 
   def contains(tp: TopicPartition): Boolean
+
+  def metadataVersion(): MetadataVersion
+
+  def getRandomAliveBrokerId: Option[Int]
+
+  def features(): FinalizedFeatures
+
+  def describeClientQuotas(request: DescribeClientQuotasRequestData): DescribeClientQuotasResponseData
+
+  def describeScramCredentials(request: DescribeUserScramCredentialsRequestData): DescribeUserScramCredentialsResponseData
 }
 
 object MetadataCache {
-  def zkMetadataCache(brokerId: Int): ZkMetadataCache = {
-    new ZkMetadataCache(brokerId)
-  }
-
-  def kRaftMetadataCache(brokerId: Int): KRaftMetadataCache = {
-    new KRaftMetadataCache(brokerId)
+  def kRaftMetadataCache(
+    brokerId: Int,
+    kraftVersionSupplier: Supplier[KRaftVersion]
+  ): KRaftMetadataCache = {
+    new KRaftMetadataCache(brokerId, kraftVersionSupplier)
   }
 }
